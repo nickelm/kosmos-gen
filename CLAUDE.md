@@ -45,7 +45,7 @@ See `docs/architecture.md` for full design.
 - Pure functions where possible
 - Deterministic: same seed = same output
 - No Three.js or DOM dependencies in src/ (editor only)
-- Coordinates in normalized space [-1, 1] unless noted
+- World data coordinates in normalized space [-1, 1] (but editor canvas is infinite/pannable)
 
 ## Editor Tabs
 

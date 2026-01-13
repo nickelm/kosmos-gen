@@ -31,7 +31,7 @@ const state = {
     halfCells: {},
     defaults: {
       profile: 'ramp',
-      baseElevation: 0.1,
+      baseElevation: 0,  // Profile slopes to sea floor; coastline is at SEA_LEVEL (0.1)
       falloffCurve: 0.5,
       noise: { roughness: 0.3, featureScale: 0.2 }
     },
@@ -165,16 +165,20 @@ function buildWorld() {
 
 /**
  * Convert elevation value to color
+ * 0.0 = deep ocean (not drawn, background shows)
+ * 0.0-0.1 = shallow ocean (light blue gradient)
+ * 0.1+ = land (green → brown → white)
  */
 function elevationToColor(e) {
   const seaLevel = 0.1;
   if (e < seaLevel) {
-    // Water: dark blue to light blue
+    // Shallow ocean: lighter blue near shore, darker toward deep
+    // t goes from 0 (deep) to 1 (shoreline)
     const t = e / seaLevel;
     return [
-      Math.floor(20 + t * 30),
-      Math.floor(40 + t * 60),
-      Math.floor(100 + t * 55)
+      Math.floor(40 + t * 60),   // 40 → 100
+      Math.floor(80 + t * 100),  // 80 → 180
+      Math.floor(140 + t * 80)   // 140 → 220
     ];
   } else {
     // Land: green → brown → white
@@ -277,23 +281,19 @@ function render() {
  * Draw ocean fill over entire canvas
  */
 function drawOceanFill() {
-  ctx.fillStyle = '#1a3d5c'; // Deep ocean blue
+  ctx.fillStyle = '#1a4c6e'; // Ocean blue (per spec)
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 /**
- * Draw land elevation as color-coded image
- * Renders entire visible area, only showing land (elevation >= sea level)
+ * Draw terrain elevation as color-coded rectangles
+ * Draws land AND shallow ocean (elevation > 0), deep ocean (0) shows through
  */
 function drawLandElevation() {
   if (!state.showElevation || state.template.spines.length === 0) return;
 
   const world = buildWorld();
-  const seaLevel = world.defaults?.baseElevation ?? 0.1;
   const step = 4; // Sample every 4 pixels
-
-  const imageData = ctx.createImageData(canvas.width, canvas.height);
-  const data = imageData.data;
 
   for (let cy = 0; cy < canvas.height; cy += step) {
     for (let cx = 0; cx < canvas.width; cx += step) {
@@ -301,25 +301,14 @@ function drawLandElevation() {
 
       const elevation = sampleElevation(world, x, z);
 
-      // Skip water pixels (ocean fill already handles them)
-      if (elevation < seaLevel) continue;
+      // Skip deep ocean (elevation = 0) - ocean fill shows through
+      if (elevation <= 0) continue;
 
       const [r, g, b] = elevationToColor(elevation);
-
-      // Fill step×step block
-      for (let dy = 0; dy < step && cy + dy < canvas.height; dy++) {
-        for (let dx = 0; dx < step && cx + dx < canvas.width; dx++) {
-          const idx = ((cy + dy) * canvas.width + (cx + dx)) * 4;
-          data[idx] = r;
-          data[idx + 1] = g;
-          data[idx + 2] = b;
-          data[idx + 3] = 255;
-        }
-      }
+      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      ctx.fillRect(cx, cy, step, step);
     }
   }
-
-  ctx.putImageData(imageData, 0, 0);
 }
 
 /**
@@ -345,32 +334,33 @@ function drawCoastlinePolygons() {
   // Extract contours if not cached
   if (!state.cache.coastlinePolylines) {
     const world = buildWorld();
-    const seaLevel = world.defaults?.baseElevation ?? 0.1;
+    // Sea level is fixed at 0.1 (baseElevation is now 0 = sea floor)
+    const seaLevel = 0.1;
 
     // Use visible bounds (with margin for smooth edges)
     const visible = getVisibleBounds();
-    const margin = 0.1;
+    const margin = 0.2;
     const bounds = {
       minX: visible.minX - margin,
       maxX: visible.maxX + margin,
       minZ: visible.minZ - margin,
       maxZ: visible.maxZ + margin
     };
-    const resolution = 0.02;
+    const resolution = 0.015; // Finer resolution for smoother coastlines
 
     // Sample function
     const sampleFn = (x, z) => sampleElevation(world, x, z);
 
     // Extract contours and simplify
     let polylines = extractContours(sampleFn, seaLevel, bounds, resolution);
-    polylines = polylines.map(pl => simplifyPolyline(pl, 0.005));
+    polylines = polylines.map(pl => simplifyPolyline(pl, 0.003));
 
     state.cache.coastlinePolylines = polylines;
   }
 
   // Render polylines as smooth vector strokes
   ctx.strokeStyle = '#4ecdc4'; // Cyan (spec color)
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2.5;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
@@ -412,8 +402,8 @@ function drawElevationContours() {
     };
     const resolution = 0.03; // Slightly coarser for performance
 
-    // Contour levels above sea level
-    const levels = [0.2, 0.4, 0.6, 0.8];
+    // Contour levels above sea level (every 0.1)
+    const levels = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
     const sampleFn = (x, z) => sampleElevation(world, x, z);
 
     state.cache.elevationContours = new Map();
@@ -684,7 +674,7 @@ function drawVertices() {
       ctx.fillStyle = '#fff';
       ctx.font = '10px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(v.elevation.toFixed(1), p.x, p.y - 14);
+      ctx.fillText(v.elevation.toFixed(2), p.x, p.y - 14);
     }
   }
 }
@@ -873,6 +863,27 @@ document.addEventListener('keydown', onKeyDown);
 function onWheel(e) {
   e.preventDefault();
   const mouse = getMousePos(e);
+
+  // Shift+wheel: adjust elevation of hovered vertex
+  if (e.shiftKey) {
+    const hit = hitTestVertex(mouse.x, mouse.y);
+    if (hit) {
+      const vertex = hit.spine.vertices[hit.vertexIndex];
+      const delta = e.deltaY > 0 ? -0.05 : 0.05;
+      vertex.elevation = Math.max(0, Math.min(1, vertex.elevation + delta));
+
+      // Update UI if this vertex is selected
+      if (state.selectedSpine === hit.spine && state.selectedVertex === hit.vertexIndex) {
+        document.getElementById('prop-elevation').value = vertex.elevation;
+        document.getElementById('prop-elevation-value').textContent = vertex.elevation.toFixed(2);
+      }
+
+      render();
+      return;
+    }
+  }
+
+  // Normal wheel: zoom
   const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
 
   // Zoom toward mouse position

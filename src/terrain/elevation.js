@@ -97,9 +97,10 @@ export function sampleElevation(world, x, z) {
     totalWeight += weight;
   }
 
-  // If no spines contribute, return base elevation
+  // If no spines contribute, return ocean floor (below sea level)
+  // baseElevation is the shoreline elevation, not open ocean
   if (totalWeight === 0) {
-    return baseElevation;
+    return 0;
   }
 
   return weightedElevation / totalWeight;
