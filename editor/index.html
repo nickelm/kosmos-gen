@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>kosmos-gen Editor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <nav id="tabs">
+      <button class="tab active" data-tab="spines">1. Spines</button>
+      <button class="tab" data-tab="noise" disabled>2. Noise</button>
+      <button class="tab" data-tab="hydrology" disabled>3. Hydrology</button>
+      <button class="tab" data-tab="climate" disabled>4. Climate</button>
+      <button class="tab" data-tab="zones" disabled>5. Zones</button>
+      <button class="tab" data-tab="content" disabled>6. Content</button>
+    </nav>
+    
+    <main id="workspace">
+      <canvas id="canvas"></canvas>
+      <aside id="panel">
+        <div id="properties">
+          <!-- Context-sensitive properties panel -->
+        </div>
+      </aside>
+    </main>
+    
+    <footer id="toolbar">
+      <div id="tools">
+        <button id="tool-select" class="tool active">Select</button>
+        <button id="tool-draw" class="tool">Draw Spine</button>
+      </div>
+      <div id="view-controls">
+        <label>Seed: <input type="number" id="seed" value="42"></label>
+        <button id="randomize">🎲</button>
+      </div>
+    </footer>
+  </div>
+  
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "kosmos-gen",
+  "version": "0.1.0",
+  "description": "Procedural world generation with spine-Voronoi terrain",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [
+    "procedural-generation",
+    "terrain",
+    "worldgen",
+    "voronoi",
+    "game-development"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}

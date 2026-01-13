@@ -1,0 +1,149 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a2e;
+  color: #eee;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* Tabs */
+#tabs {
+  display: flex;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+}
+
+.tab {
+  padding: 12px 24px;
+  background: transparent;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.tab:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tab.active {
+  color: #fff;
+  background: #0f3460;
+  border-bottom: 2px solid #e94560;
+}
+
+.tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Workspace */
+#workspace {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+#canvas {
+  flex: 1;
+  background: #0a0a1a;
+  cursor: crosshair;
+}
+
+#panel {
+  width: 280px;
+  background: #16213e;
+  border-left: 1px solid #0f3460;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+#properties h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: #888;
+  margin-bottom: 12px;
+}
+
+/* Toolbar */
+#toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px;
+  background: #16213e;
+  border-top: 1px solid #0f3460;
+}
+
+#tools {
+  display: flex;
+  gap: 8px;
+}
+
+.tool {
+  padding: 8px 16px;
+  background: #0f3460;
+  border: 1px solid #1a1a4e;
+  border-radius: 4px;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.tool:hover {
+  background: #1a3a6e;
+}
+
+.tool.active {
+  background: #e94560;
+  border-color: #e94560;
+  color: #fff;
+}
+
+#view-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#view-controls label {
+  font-size: 13px;
+  color: #888;
+}
+
+#view-controls input {
+  width: 80px;
+  padding: 6px 8px;
+  background: #0f3460;
+  border: 1px solid #1a1a4e;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 13px;
+}
+
+#randomize {
+  padding: 6px 12px;
+  background: #0f3460;
+  border: 1px solid #1a1a4e;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+#randomize:hover {
+  background: #1a3a6e;
+}
