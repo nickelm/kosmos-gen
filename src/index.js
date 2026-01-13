@@ -9,6 +9,7 @@ export { seededRandom, deriveSeed } from './core/seeds.js';
 
 // Geometry
 export { computeVoronoi } from './geometry/voronoi.js';
+export { extractContours, simplifyPolyline, isClosedLoop } from './geometry/contour.js';
 
 // Terrain
 export { createSpine, getHalfCells } from './terrain/spine.js';

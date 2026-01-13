@@ -119,7 +119,32 @@ export function sampleElevation(world, x, z) {
     let distance, side;
 
     if (isEndpoint) {
-      distance = Math.sqrt((x - seed.x) ** 2 + (z - seed.z) ** 2);
+      // For endpoints, check if point is "in front of" the spine (not behind it)
+      const adjacentVertex = vertexIndex === 0
+        ? spine.vertices[1]
+        : spine.vertices[spine.vertices.length - 2];
+
+      // Direction from endpoint toward the spine interior
+      const spineDir = {
+        x: adjacentVertex.x - seed.x,
+        z: adjacentVertex.z - seed.z
+      };
+
+      // Direction from endpoint to query point
+      const pointDir = {
+        x: x - seed.x,
+        z: z - seed.z
+      };
+
+      // Dot product: positive if point is "in front" (toward spine), negative if "behind"
+      const dot = spineDir.x * pointDir.x + spineDir.z * pointDir.z;
+
+      if (dot < 0) {
+        // Point is behind the endpoint - skip this seed's contribution
+        continue;
+      }
+
+      distance = Math.sqrt(pointDir.x * pointDir.x + pointDir.z * pointDir.z);
       side = 'radial';
     } else {
       const prevVertex = spine.vertices[vertexIndex - 1];
@@ -129,18 +154,22 @@ export function sampleElevation(world, x, z) {
       const prevSeg = distanceToSegment(x, z, prevVertex, currVertex);
       const nextSeg = distanceToSegment(x, z, currVertex, nextVertex);
 
-      let closerV1, closerV2;
-      if (prevSeg.distance <= nextSeg.distance) {
-        distance = prevSeg.distance;
-        closerV1 = prevVertex;
-        closerV2 = currVertex;
-      } else {
-        distance = nextSeg.distance;
-        closerV1 = currVertex;
-        closerV2 = nextVertex;
-      }
+      // Radial distance from the vertex itself
+      const radialDist = Math.sqrt((x - currVertex.x) ** 2 + (z - currVertex.z) ** 2);
 
-      side = getSide(x, z, closerV1, closerV2);
+      // Use minimum of segment distances
+      const segmentDist = Math.min(prevSeg.distance, nextSeg.distance);
+
+      // Final distance: minimum of segment and radial
+      // This ensures smooth circular falloff near the vertex
+      distance = Math.min(segmentDist, radialDist);
+
+      // Determine side based on which segment is closer
+      if (prevSeg.distance <= nextSeg.distance) {
+        side = getSide(x, z, prevVertex, currVertex);
+      } else {
+        side = getSide(x, z, currVertex, nextVertex);
+      }
     }
 
     // Normalize distance by influence

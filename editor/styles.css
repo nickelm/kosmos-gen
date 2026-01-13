@@ -56,22 +56,24 @@ body {
   flex: 1;
   display: flex;
   overflow: hidden;
+  min-height: 0; /* Prevent flex overflow */
 }
 
 #canvas {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0; /* Allow canvas to shrink */
   background: #0a0a1a;
   cursor: crosshair;
+  display: block; /* Remove inline spacing */
 }
 
 #panel {
   width: 280px;
-  min-width: 280px;
+  flex: 0 0 280px; /* Don't grow, don't shrink, basis 280px */
   background: #1a2a4a;
   border-left: 2px solid #0f3460;
   padding: 16px;
   overflow-y: auto;
-  flex-shrink: 0;
 }
 
 #properties h3 {
@@ -102,6 +104,17 @@ body {
   float: right;
   color: #4a9fff;
   font-weight: bold;
+}
+
+#properties select {
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: #0f3460;
+  border: 1px solid #1a1a4e;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 13px;
 }
 
 /* Toolbar */
