@@ -859,7 +859,7 @@ function onKeyDown(e) {
  * Finish drawing current spine (if valid)
  */
 function finishDrawing() {
-  if (state.drawingSpine && state.drawingSpine.vertices.length >= 2) {
+  if (state.drawingSpine && state.drawingSpine.vertices.length >= 1) {
     state.template.spines.push(state.drawingSpine);
   }
   state.isDrawing = false;

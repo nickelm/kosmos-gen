@@ -6,7 +6,7 @@ import { findCell } from '../geometry/voronoi.js';
 import { getSide, getHalfCellConfig } from './spine.js';
 
 /**
- * Compute distance from a point to a line segment
+ * Compute distance from a point to a line segment (clamped)
  *
  * @param {number} px - Point X coordinate
  * @param {number} pz - Point Z coordinate
@@ -40,25 +40,6 @@ function distanceToSegment(px, pz, v1, v2) {
 }
 
 /**
- * Find the spine and vertex index for a given seed
- *
- * @param {Object} world - World object
- * @param {number} seedIndex - Index into world.voronoi.seeds
- * @returns {{spine: Object, vertexIndex: number, seed: Object}}
- */
-function findSpineAndVertex(world, seedIndex) {
-  const seed = world.voronoi.seeds[seedIndex];
-  const spine = world.template.spines.find(s => s.id === seed.spineId);
-
-  // Find vertex index by matching coordinates
-  const vertexIndex = spine.vertices.findIndex(
-    v => v.x === seed.x && v.z === seed.z
-  );
-
-  return { spine, vertexIndex, seed };
-}
-
-/**
  * Profile functions for elevation falloff
  */
 const PROFILES = {
@@ -66,17 +47,17 @@ const PROFILES = {
    * Linear slope from spine to boundary
    */
   ramp: (t) => 1 - t,
-  
+
   /**
    * Flat top with steep edges
    */
   plateau: (t) => t < 0.4 ? 1 : 1 - (t - 0.4) / 0.6,
-  
+
   /**
    * Concave, collects water
    */
   bowl: (t) => 1 - t * t,
-  
+
   /**
    * Convex, sheds water
    */
@@ -92,109 +73,111 @@ const PROFILES = {
  * @returns {number} Elevation in [0, 1]
  */
 export function sampleElevation(world, x, z) {
-  const seeds = world.voronoi?.seeds;
+  const spines = world.template?.spines;
   const baseElevation = world.defaults?.baseElevation ?? 0.1;
 
   // Handle empty world
-  if (!seeds || seeds.length === 0) {
+  if (!spines || spines.length === 0) {
     return baseElevation;
   }
 
-  // Collect contributions from all seeds with blending weights
+  // Collect contributions from all spines
   let totalWeight = 0;
   let weightedElevation = 0;
 
-  for (let i = 0; i < seeds.length; i++) {
-    const seed = seeds[i];
-    const spine = world.template.spines.find(s => s.id === seed.spineId);
-    if (!spine) continue;
+  for (const spine of spines) {
+    if (!spine.vertices || spine.vertices.length === 0) continue;
 
-    const vertexIndex = spine.vertices.findIndex(
-      v => v.x === seed.x && v.z === seed.z
-    );
-    if (vertexIndex === -1) continue;
+    // Find closest point on spine and compute elevation contribution
+    const result = getSpineContribution(x, z, spine, world, baseElevation);
+    if (!result) continue;
 
-    // Compute distance to this seed's spine
-    const isEndpoint = (vertexIndex === 0 || vertexIndex === spine.vertices.length - 1);
-    let distance, side;
-
-    if (isEndpoint) {
-      // For endpoints, check if point is "in front of" the spine (not behind it)
-      const adjacentVertex = vertexIndex === 0
-        ? spine.vertices[1]
-        : spine.vertices[spine.vertices.length - 2];
-
-      // Direction from endpoint toward the spine interior
-      const spineDir = {
-        x: adjacentVertex.x - seed.x,
-        z: adjacentVertex.z - seed.z
-      };
-
-      // Direction from endpoint to query point
-      const pointDir = {
-        x: x - seed.x,
-        z: z - seed.z
-      };
-
-      // Dot product: positive if point is "in front" (toward spine), negative if "behind"
-      const dot = spineDir.x * pointDir.x + spineDir.z * pointDir.z;
-
-      if (dot < 0) {
-        // Point is behind the endpoint - skip this seed's contribution
-        continue;
-      }
-
-      distance = Math.sqrt(pointDir.x * pointDir.x + pointDir.z * pointDir.z);
-      side = 'radial';
-    } else {
-      const prevVertex = spine.vertices[vertexIndex - 1];
-      const currVertex = spine.vertices[vertexIndex];
-      const nextVertex = spine.vertices[vertexIndex + 1];
-
-      const prevSeg = distanceToSegment(x, z, prevVertex, currVertex);
-      const nextSeg = distanceToSegment(x, z, currVertex, nextVertex);
-
-      // Radial distance from the vertex itself
-      const radialDist = Math.sqrt((x - currVertex.x) ** 2 + (z - currVertex.z) ** 2);
-
-      // Use minimum of segment distances
-      const segmentDist = Math.min(prevSeg.distance, nextSeg.distance);
-
-      // Final distance: minimum of segment and radial
-      // This ensures smooth circular falloff near the vertex
-      distance = Math.min(segmentDist, radialDist);
-
-      // Determine side based on which segment is closer
-      if (prevSeg.distance <= nextSeg.distance) {
-        side = getSide(x, z, prevVertex, currVertex);
-      } else {
-        side = getSide(x, z, currVertex, nextVertex);
-      }
-    }
-
-    // Normalize distance by influence
-    const t = distance / seed.influence;
-
-    // Only contribute if within influence range (with some margin for blending)
-    if (t > 1.5) continue;
-
-    const config = getHalfCellConfig(world, spine.id, vertexIndex, side);
-    const elevation = computeProfileElevation(seed.elevation, config.baseElevation, Math.min(1, t), config.profile);
-
-    // Weight using smooth falloff (inverse distance with smoothing)
-    // Closer seeds have more influence
-    const weight = Math.max(0, 1 - t * 0.8) ** 2;
-
+    const { elevation, weight } = result;
     weightedElevation += elevation * weight;
     totalWeight += weight;
   }
 
-  // If no seeds contribute, return base elevation
+  // If no spines contribute, return base elevation
   if (totalWeight === 0) {
     return baseElevation;
   }
 
   return weightedElevation / totalWeight;
+}
+
+/**
+ * Get elevation contribution from a single spine
+ *
+ * @param {number} x - Query X
+ * @param {number} z - Query Z
+ * @param {Object} spine - Spine object
+ * @param {Object} world - World object (for half-cell config)
+ * @param {number} baseElevation - Default base elevation
+ * @returns {{elevation: number, weight: number} | null}
+ */
+function getSpineContribution(x, z, spine, world, baseElevation) {
+  const vertices = spine.vertices;
+
+  // Single vertex: pure radial
+  if (vertices.length === 1) {
+    const v = vertices[0];
+    const dist = Math.sqrt((x - v.x) ** 2 + (z - v.z) ** 2);
+    // Influence stored as percentage (0-100), convert to normalized (0-1)
+    const influence = v.influence / 100;
+    const t = dist / influence;
+
+    if (t > 1.5) return null;
+
+    const config = getHalfCellConfig(world, spine.id, 0, 'radial');
+    const elevation = computeProfileElevation(v.elevation, config.baseElevation, Math.min(1, t), config.profile);
+    const weight = Math.max(0, 1 - t * 0.8) ** 2;
+
+    return { elevation, weight };
+  }
+
+  // Multi-vertex: find closest point on spine polyline
+  let bestDist = Infinity;
+  let bestT = 0;
+  let bestSegIndex = 0;
+  let bestSpineElevation = vertices[0].elevation;
+  // Influence stored as percentage (0-100), convert to normalized (0-1)
+  let bestInfluence = vertices[0].influence / 100;
+
+  for (let i = 0; i < vertices.length - 1; i++) {
+    const v0 = vertices[i];
+    const v1 = vertices[i + 1];
+
+    const seg = distanceToSegment(x, z, v0, v1);
+
+    if (seg.distance < bestDist) {
+      bestDist = seg.distance;
+      bestT = seg.t;
+      bestSegIndex = i;
+      // Interpolate elevation and influence along segment
+      bestSpineElevation = v0.elevation + seg.t * (v1.elevation - v0.elevation);
+      // Convert influence from percentage to normalized
+      bestInfluence = (v0.influence + seg.t * (v1.influence - v0.influence)) / 100;
+    }
+  }
+
+  // Normalize distance by interpolated influence
+  const normalizedDist = bestDist / bestInfluence;
+
+  if (normalizedDist > 1.5) return null;
+
+  // Determine side and vertex index for config lookup
+  const v0 = vertices[bestSegIndex];
+  const v1 = vertices[bestSegIndex + 1];
+  const side = getSide(x, z, v0, v1);
+
+  // Use the vertex closer to the projection point for config
+  const vertexIndex = bestT < 0.5 ? bestSegIndex : bestSegIndex + 1;
+
+  const config = getHalfCellConfig(world, spine.id, vertexIndex, side);
+  const elevation = computeProfileElevation(bestSpineElevation, config.baseElevation, Math.min(1, normalizedDist), config.profile);
+  const weight = Math.max(0, 1 - normalizedDist * 0.8) ** 2;
+
+  return { elevation, weight };
 }
 
 /**
@@ -208,7 +191,7 @@ export function getProfile(name) {
 
 /**
  * Compute elevation from profile
- * 
+ *
  * @param {number} spineElevation - Elevation at spine vertex
  * @param {number} baseElevation - Elevation at cell boundary
  * @param {number} distance - Distance from spine (normalized 0-1)

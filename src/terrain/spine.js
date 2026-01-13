@@ -26,7 +26,16 @@ export function createSpine(id, vertices) {
  */
 export function getHalfCells(spine) {
   const cells = [];
-  
+
+  // Single-vertex spine: one radial cell (The Lonely Mountain)
+  if (spine.vertices.length === 1) {
+    return [{
+      id: `${spine.id}:0:radial`,
+      vertexIndex: 0,
+      side: 'radial'
+    }];
+  }
+
   for (let i = 0; i < spine.vertices.length; i++) {
     const isEndpoint = (i === 0 || i === spine.vertices.length - 1);
     
