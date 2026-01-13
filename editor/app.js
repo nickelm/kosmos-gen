@@ -11,8 +11,8 @@
  */
 
 import { sampleElevation } from '../src/terrain/elevation.js';
-import { findCell } from '../src/geometry/voronoi.js';
-import { getSide, getHalfCellId, getHalfCellConfig } from '../src/terrain/spine.js';
+import { findHalfCellAt, extractHalfCellBoundary } from '../src/geometry/voronoi.js';
+import { getSide, getHalfCellId, getHalfCellConfig, getHalfCells } from '../src/terrain/spine.js';
 import { extractContours, simplifyPolyline } from '../src/geometry/contour.js';
 
 // =============================================================================
@@ -53,6 +53,7 @@ const state = {
   selectedSpine: null,
   selectedVertex: null,
   selectedHalfCell: null,
+  hoveredHalfCell: null,
   isDrawing: false,
   drawingSpine: null,
   isDragging: false,
@@ -69,6 +70,7 @@ const state = {
   cache: {
     coastlinePolylines: null,
     elevationContours: null,
+    cellBoundaries: null,  // Map: "spineId:vertexIndex:side" → polylines[]
     cacheKey: null
   }
 };
@@ -241,6 +243,7 @@ function invalidateContourCacheIfNeeded() {
   if (state.cache.cacheKey !== currentKey) {
     state.cache.coastlinePolylines = null;
     state.cache.elevationContours = null;
+    state.cache.cellBoundaries = null;
     state.cache.cacheKey = currentKey;
   }
 }
@@ -264,10 +267,20 @@ function render() {
   // Layer 4: Coastline (vector strokes)
   drawCoastlinePolygons();
 
-  // Layer 5: Selection highlight
-  drawSelectedHalfCell();
+  // Layer 5: Cell boundaries (dashed lines for all cells)
+  drawCellBoundaries();
 
-  // Layer 6: Grid, boundary, spines, vertices
+  // Layer 6: Hovered cell highlight (cyan) - only if different from selected
+  if (state.hoveredHalfCell && !halfCellsEqual(state.hoveredHalfCell, state.selectedHalfCell)) {
+    drawHighlightedCell(state.hoveredHalfCell, 'rgba(78, 205, 196, 0.2)', '#4ecdc4');
+  }
+
+  // Layer 7: Selected cell highlight (red)
+  if (state.selectedHalfCell) {
+    drawHighlightedCell(state.selectedHalfCell, 'rgba(233, 69, 96, 0.3)', '#e94560');
+  }
+
+  // Layer 8: Grid, boundary, spines, vertices
   drawGrid();
   drawWorldBoundary();
   drawSpines();
@@ -444,44 +457,109 @@ function drawElevationContours() {
 }
 
 /**
- * Draw highlight for the selected half-cell
+ * Check if two half-cell references are equal
  */
-function drawSelectedHalfCell() {
-  if (!state.selectedHalfCell) return;
+function halfCellsEqual(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return a.spineId === b.spineId &&
+         a.vertexIndex === b.vertexIndex &&
+         a.side === b.side;
+}
 
-  const { spineId, vertexIndex, side } = state.selectedHalfCell;
-  const spine = state.template.spines.find(s => s.id === spineId);
-  if (!spine) return;
+/**
+ * Draw dashed boundaries for all half-cells
+ */
+function drawCellBoundaries() {
+  if (state.template.spines.length === 0) return;
 
-  const vertex = spine.vertices[vertexIndex];
-  if (!vertex) return;
+  const world = buildWorld();
 
-  // Get visible bounds (clamped to world)
+  // Initialize cache if needed
+  if (!state.cache.cellBoundaries) {
+    state.cache.cellBoundaries = new Map();
+  }
+
+  // Get visible bounds with margin
   const topLeft = canvasToWorld(0, 0);
   const bottomRight = canvasToWorld(canvas.width, canvas.height);
-  const minX = Math.max(-1, topLeft.x);
-  const maxX = Math.min(1, bottomRight.x);
-  const minZ = Math.max(-1, topLeft.z);
-  const maxZ = Math.min(1, bottomRight.z);
+  const bounds = {
+    minX: Math.max(-1, topLeft.x - 0.1),
+    maxX: Math.min(1, bottomRight.x + 0.1),
+    minZ: Math.max(-1, topLeft.z - 0.1),
+    maxZ: Math.min(1, bottomRight.z + 0.1)
+  };
 
-  // Sample visible world area and highlight points in this half-cell
-  const step = 0.02;
-  ctx.fillStyle = 'rgba(233, 69, 96, 0.3)';
-  const pixelSize = Math.max(1, step * state.view.zoom);
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.setLineDash([4, 4]);
+  ctx.lineWidth = 1;
 
-  for (let wx = minX; wx <= maxX; wx += step) {
-    for (let wz = minZ; wz <= maxZ; wz += step) {
-      // Check if this point belongs to selected half-cell
-      const p = worldToCanvas(wx, wz);
-      const hit = hitTestHalfCell(p.x, p.y);
-      if (hit &&
-          hit.spineId === spineId &&
-          hit.vertexIndex === vertexIndex &&
-          hit.side === side) {
-        ctx.fillRect(p.x, p.y, pixelSize, pixelSize);
+  for (const spine of state.template.spines) {
+    const halfCells = getHalfCells(spine);
+    for (const hc of halfCells) {
+      const cacheKey = getHalfCellId(spine.id, hc.vertexIndex, hc.side);
+
+      let polylines = state.cache.cellBoundaries.get(cacheKey);
+      if (!polylines) {
+        polylines = extractHalfCellBoundary(
+          spine.id, hc.vertexIndex, hc.side,
+          state.template.spines, world.voronoi.seeds,
+          bounds, 0.015
+        );
+        state.cache.cellBoundaries.set(cacheKey, polylines);
+      }
+
+      // Draw polylines
+      for (const polyline of polylines) {
+        if (polyline.length < 2) continue;
+        ctx.beginPath();
+        const first = worldToCanvas(polyline[0].x, polyline[0].z);
+        ctx.moveTo(first.x, first.y);
+        for (let i = 1; i < polyline.length; i++) {
+          const p = worldToCanvas(polyline[i].x, polyline[i].z);
+          ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
       }
     }
   }
+
+  ctx.restore();
+}
+
+/**
+ * Draw a highlighted half-cell with fill and stroke
+ */
+function drawHighlightedCell(halfCell, fillColor, strokeColor) {
+  if (!halfCell) return;
+  if (!state.cache.cellBoundaries) return;
+
+  const cacheKey = getHalfCellId(halfCell.spineId, halfCell.vertexIndex, halfCell.side);
+  const polylines = state.cache.cellBoundaries.get(cacheKey);
+  if (!polylines || polylines.length === 0) return;
+
+  ctx.save();
+  ctx.fillStyle = fillColor;
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);  // Solid line
+
+  for (const polyline of polylines) {
+    if (polyline.length < 3) continue;
+    ctx.beginPath();
+    const first = worldToCanvas(polyline[0].x, polyline[0].z);
+    ctx.moveTo(first.x, first.y);
+    for (let i = 1; i < polyline.length; i++) {
+      const p = worldToCanvas(polyline[i].x, polyline[i].z);
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  ctx.restore();
 }
 
 function drawGrid() {
@@ -737,6 +815,7 @@ function onMouseDown(e) {
       state.selectedSpine = vertexHit.spine;
       state.selectedVertex = vertexHit.vertexIndex;
       state.selectedHalfCell = null;  // Clear half-cell selection
+      state.hoveredHalfCell = null;   // Clear hover when selecting vertex
       state.isDragging = true;
     } else {
       // Try to select a half-cell
@@ -809,6 +888,25 @@ function onMouseMove(e) {
       state.hoveredSpine = hit;
       render();
     }
+    return;
+  }
+
+  // Handle half-cell hover highlight in select mode
+  if (state.currentTool === 'select') {
+    const { x, z } = canvasToWorld(mouse.x, mouse.y);
+    // Only check hover within world bounds
+    if (x >= -1 && x <= 1 && z >= -1 && z <= 1) {
+      const hovered = hitTestHalfCell(mouse.x, mouse.y);
+      if (!halfCellsEqual(hovered, state.hoveredHalfCell)) {
+        state.hoveredHalfCell = hovered;
+        canvas.style.cursor = hovered ? 'pointer' : 'default';
+        render();
+      }
+    } else if (state.hoveredHalfCell) {
+      state.hoveredHalfCell = null;
+      canvas.style.cursor = 'default';
+      render();
+    }
   }
 }
 
@@ -837,8 +935,9 @@ function onKeyDown(e) {
       state.isDrawing = false;
       state.drawingSpine = null;
     }
-    // Clear all selection
+    // Clear all selection and hover
     state.selectedHalfCell = null;
+    state.hoveredHalfCell = null;
     state.selectedSpine = null;
     state.selectedVertex = null;
     render();
@@ -1015,59 +1114,8 @@ function hitTestHalfCell(cx, cy) {
   const seeds = world.voronoi.seeds;
   if (seeds.length === 0) return null;
 
-  // Find owning seed via power diagram
-  const seedIndex = findCell(x, z, seeds);
-  const seed = seeds[seedIndex];
-
-  const spine = state.template.spines.find(s => s.id === seed.spineId);
-  if (!spine) return null;
-
-  const vertexIndex = spine.vertices.findIndex(
-    v => v.x === seed.x && v.z === seed.z
-  );
-  if (vertexIndex === -1) return null;
-
-  // Determine side
-  const isEndpoint = (vertexIndex === 0 || vertexIndex === spine.vertices.length - 1);
-  let side;
-
-  if (isEndpoint) {
-    side = 'radial';
-  } else {
-    const prevVertex = spine.vertices[vertexIndex - 1];
-    const currVertex = spine.vertices[vertexIndex];
-    const nextVertex = spine.vertices[vertexIndex + 1];
-
-    // Compute the bisector direction at this vertex
-    // Vector from prev to curr (normalized)
-    const d1x = currVertex.x - prevVertex.x;
-    const d1z = currVertex.z - prevVertex.z;
-    const len1 = Math.sqrt(d1x * d1x + d1z * d1z);
-    const n1x = len1 > 0 ? d1x / len1 : 0;
-    const n1z = len1 > 0 ? d1z / len1 : 0;
-
-    // Vector from curr to next (normalized)
-    const d2x = nextVertex.x - currVertex.x;
-    const d2z = nextVertex.z - currVertex.z;
-    const len2 = Math.sqrt(d2x * d2x + d2z * d2z);
-    const n2x = len2 > 0 ? d2x / len2 : 0;
-    const n2z = len2 > 0 ? d2z / len2 : 0;
-
-    // Bisector is average of the two directions
-    const bisectX = n1x + n2x;
-    const bisectZ = n1z + n2z;
-
-    // Use cross product of bisector with point-to-vertex to determine side
-    // Point relative to vertex
-    const px = x - currVertex.x;
-    const pz = z - currVertex.z;
-
-    // Cross product: bisect × point
-    const cross = bisectX * pz - bisectZ * px;
-    side = cross < 0 ? 'left' : 'right';
-  }
-
-  return { spineId: spine.id, vertexIndex, side };
+  // Use shared findHalfCellAt for consistent behavior with boundary extraction
+  return findHalfCellAt(x, z, state.template.spines, seeds);
 }
 
 // =============================================================================
@@ -1094,6 +1142,8 @@ document.querySelectorAll('.tool').forEach(tool => {
     document.querySelector('.tool.active').classList.remove('active');
     tool.classList.add('active');
     state.currentTool = tool.id.replace('tool-', '');
+    // Clear hover state when changing tools
+    state.hoveredHalfCell = null;
     // Set cursor based on tool
     if (state.currentTool === 'draw') {
       canvas.style.cursor = 'crosshair';
@@ -1102,6 +1152,7 @@ document.querySelectorAll('.tool').forEach(tool => {
     } else {
       canvas.style.cursor = 'default';
     }
+    render();
   });
 });
 
@@ -1124,6 +1175,7 @@ document.getElementById('clear-canvas').addEventListener('click', () => {
     state.selectedSpine = null;
     state.selectedVertex = null;
     state.selectedHalfCell = null;
+    state.hoveredHalfCell = null;
     state.hoveredSpine = null;
     state.isDrawing = false;
     state.drawingSpine = null;

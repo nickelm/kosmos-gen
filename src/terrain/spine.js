@@ -36,29 +36,21 @@ export function getHalfCells(spine) {
     }];
   }
 
+  // All vertices (including endpoints) have left/right half-cells
+  // Endpoints are split by the spine direction at that point
   for (let i = 0; i < spine.vertices.length; i++) {
-    const isEndpoint = (i === 0 || i === spine.vertices.length - 1);
-    
-    if (isEndpoint) {
-      cells.push({
-        id: `${spine.id}:${i}:radial`,
-        vertexIndex: i,
-        side: 'radial'
-      });
-    } else {
-      cells.push({
-        id: `${spine.id}:${i}:left`,
-        vertexIndex: i,
-        side: 'left'
-      });
-      cells.push({
-        id: `${spine.id}:${i}:right`,
-        vertexIndex: i,
-        side: 'right'
-      });
-    }
+    cells.push({
+      id: `${spine.id}:${i}:left`,
+      vertexIndex: i,
+      side: 'left'
+    });
+    cells.push({
+      id: `${spine.id}:${i}:right`,
+      vertexIndex: i,
+      side: 'right'
+    });
   }
-  
+
   return cells;
 }
 
