@@ -7,6 +7,8 @@
  * - Queried for terrain data
  */
 
+import { sampleElevation } from '../terrain/elevation.js';
+
 export class World {
   /**
    * @param {Object} data - World data
@@ -39,8 +41,7 @@ export class World {
    * @returns {number} Elevation [0, 1]
    */
   getElevationAt(x, z) {
-    // TODO: Implement via SDF lookup or direct computation
-    return 0;
+    return sampleElevation(this, x, z);
   }
   
   /**
