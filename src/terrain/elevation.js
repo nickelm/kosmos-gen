@@ -5,6 +5,8 @@
 import { getSide, getHalfCellConfig } from './spine.js';
 import { createDomainWarp, DEFAULT_WARP_CONFIG } from '../core/warp.js';
 import { sampleSurfaceNoise, DEFAULT_SURFACE_NOISE_CONFIG } from './surfacenoise.js';
+import { sampleRidgeNoise, DEFAULT_RIDGE_NOISE_CONFIG } from './ridgenoise.js';
+import { sampleMicroDetail, DEFAULT_MICRO_DETAIL_CONFIG } from './microdetail.js';
 
 /** Default blend width as fraction of influence radius */
 const DEFAULT_BLEND_WIDTH = 0.15;
@@ -212,6 +214,16 @@ export function sampleElevation(world, x, z, options = {}) {
 
   let elevation = weightedElevation / totalWeight;
 
+  // Add ridge/erosion noise for drainage patterns near spines
+  // Applied before surface noise so erosion channels exist at all scales
+  if (includeNoise) {
+    const ridgeConfig = world.defaults?.ridgeNoise ?? DEFAULT_RIDGE_NOISE_CONFIG;
+    if (ridgeConfig.enabled !== false) {
+      const ridgeDeviation = sampleRidgeNoise(world, x, z, elevation);
+      elevation += ridgeDeviation; // ridgeDeviation is negative (erosion)
+    }
+  }
+
   // Add surface noise for terrain variation
   // Noise is applied to both land and seafloor uniformly
   // Islands emerge where seafloor + noise > sea level
@@ -220,9 +232,22 @@ export function sampleElevation(world, x, z, options = {}) {
     if (noiseConfig.enabled !== false) {
       const noiseDeviation = sampleSurfaceNoise(world, x, z, elevation);
       elevation += noiseDeviation;
-      // Clamp to valid range
-      elevation = Math.max(0, Math.min(1, elevation));
     }
+  }
+
+  // Add micro detail for surface texture at close range
+  // Small-scale variation that doesn't affect coastline extraction
+  if (includeNoise) {
+    const microConfig = world.defaults?.microDetail ?? DEFAULT_MICRO_DETAIL_CONFIG;
+    if (microConfig.enabled !== false) {
+      const microDeviation = sampleMicroDetail(world, x, z);
+      elevation += microDeviation;
+    }
+  }
+
+  // Clamp to valid range after all noise layers
+  if (includeNoise) {
+    elevation = Math.max(0, Math.min(1, elevation));
   }
 
   return elevation;

@@ -36,6 +36,16 @@ export {
   getHalfCellNoiseConfig,
   DEFAULT_SURFACE_NOISE_CONFIG
 } from './terrain/surfacenoise.js';
+export {
+  sampleRidgeNoise,
+  createRidgedNoise,
+  getHalfCellRidgeConfig,
+  DEFAULT_RIDGE_NOISE_CONFIG
+} from './terrain/ridgenoise.js';
+export {
+  sampleMicroDetail,
+  DEFAULT_MICRO_DETAIL_CONFIG
+} from './terrain/microdetail.js';
 
 // World
 export { World } from './world/world.js';

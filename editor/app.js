@@ -41,6 +41,10 @@ const state = {
         strength: 0.05,   // Maximum displacement in normalized units
         scale: 0.015,     // Noise frequency (lower = larger features)
         octaves: 2
+      },
+      microDetail: {
+        enabled: true,
+        amplitude: 0.02   // Small-scale surface texture
       }
     },
     climate: {},
@@ -1392,6 +1396,19 @@ document.getElementById('default-feature-scale').addEventListener('input', (e) =
   render();
 });
 
+// Micro detail controls
+document.getElementById('micro-detail-enabled').addEventListener('change', (e) => {
+  state.template.defaults.microDetail.enabled = e.target.checked;
+  render();
+});
+
+document.getElementById('micro-detail-amplitude').addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value);
+  state.template.defaults.microDetail.amplitude = value;
+  document.getElementById('micro-detail-amplitude-value').textContent = value.toFixed(3);
+  render();
+});
+
 // Per-cell noise controls
 document.getElementById('prop-cell-roughness').addEventListener('input', (e) => {
   if (!state.selectedHalfCell) return;
@@ -1559,6 +1576,7 @@ function updatePropertiesPanel() {
 function syncNoisePanelUI() {
   const warp = state.template.defaults.warp;
   const noise = state.template.defaults.noise;
+  const microDetail = state.template.defaults.microDetail;
 
   document.getElementById('warp-enabled').checked = warp.enabled;
   document.getElementById('warp-strength').value = warp.strength;
@@ -1570,6 +1588,10 @@ function syncNoisePanelUI() {
   document.getElementById('default-roughness-value').textContent = noise.roughness.toFixed(2);
   document.getElementById('default-feature-scale').value = noise.featureScale;
   document.getElementById('default-feature-scale-value').textContent = noise.featureScale.toFixed(2);
+
+  document.getElementById('micro-detail-enabled').checked = microDetail.enabled;
+  document.getElementById('micro-detail-amplitude').value = microDetail.amplitude;
+  document.getElementById('micro-detail-amplitude-value').textContent = microDetail.amplitude.toFixed(3);
 }
 
 resizeCanvas();
