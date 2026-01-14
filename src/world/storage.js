@@ -3,12 +3,55 @@
  */
 
 import { World } from './world.js';
+import { generateBlobId } from '../terrain/blob.js';
 
 const DB_NAME = 'kosmos-gen';
 const DB_VERSION = 1;
 const STORE_WORLDS = 'worlds';
 
 let db = null;
+
+/**
+ * Migrate v1 data (spine-based) to v2 (blob-based)
+ * Each spine vertex becomes a blob
+ * @param {Object} data - World data from storage
+ * @returns {Object} Migrated data
+ */
+function migrateV1toV2(data) {
+  if (data.version >= 2) return data;
+  if (!data.template?.spines) return data;
+
+  const blobs = [];
+
+  for (const spine of data.template.spines) {
+    if (!spine.vertices) continue;
+
+    for (const vertex of spine.vertices) {
+      blobs.push({
+        id: generateBlobId(),
+        x: vertex.x,
+        z: vertex.z,
+        elevation: vertex.elevation ?? 0.5,
+        radius: (vertex.influence ?? 25) / 100,  // Convert influence to radius
+        profile: 'cone'
+      });
+    }
+  }
+
+  // Create migrated template
+  const migratedTemplate = {
+    ...data.template,
+    blobs
+  };
+  delete migratedTemplate.spines;
+  delete migratedTemplate.halfCells;
+
+  return {
+    ...data,
+    version: 2,
+    template: migratedTemplate
+  };
+}
 
 /**
  * Initialize the database
@@ -64,16 +107,18 @@ export async function saveWorld(world) {
  */
 export async function loadWorld(id) {
   const database = await initDB();
-  
+
   return new Promise((resolve, reject) => {
     const tx = database.transaction(STORE_WORLDS, 'readonly');
     const store = tx.objectStore(STORE_WORLDS);
-    
+
     const request = store.get(id);
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       if (request.result) {
-        resolve(World.fromJSON(request.result));
+        // Apply migrations if needed
+        const data = migrateV1toV2(request.result);
+        resolve(World.fromJSON(data));
       } else {
         resolve(null);
       }

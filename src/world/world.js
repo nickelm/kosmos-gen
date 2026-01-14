@@ -27,9 +27,7 @@ export class World {
    * @param {Object} data - World data
    * @param {string} data.id - World identifier
    * @param {number} data.seed - Generation seed
-   * @param {Object} data.template - Source template
-   * @param {Object} data.voronoi - Computed Voronoi diagram
-   * @param {Object} data.halfCells - Half-cell configurations
+   * @param {Object} data.template - Source template (contains blobs array)
    * @param {Array} data.rivers - River polylines
    * @param {Array} data.lakes - Lake polygons
    * @param {Array} data.waterSources - Water source locations
@@ -42,8 +40,6 @@ export class World {
     this.id = data.id;
     this.seed = data.seed;
     this.template = data.template;
-    this.voronoi = data.voronoi;
-    this.halfCells = data.halfCells || {};
     this.rivers = data.rivers || [];
     this.lakes = data.lakes || [];
     this.waterSources = data.waterSources || [];
@@ -94,11 +90,10 @@ export class World {
    */
   toJSON() {
     return {
+      version: 2,  // Blob-based terrain format
       id: this.id,
       seed: this.seed,
       template: this.template,
-      voronoi: this.voronoi,
-      halfCells: this.halfCells,
       rivers: this.rivers,
       lakes: this.lakes,
       waterSources: this.waterSources,

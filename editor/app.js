@@ -2,7 +2,7 @@
  * kosmos-gen Editor
  *
  * Template editor with tab-based workflow:
- * 1. Spines - Draw spines, see Voronoi and coastline
+ * 1. Terrain - Place blobs, see elevation and coastline
  * 2. Noise - Add procedural detail
  * 3. Hydrology - Rivers and lakes
  * 4. Climate - Temperature, humidity, biomes
@@ -10,14 +10,11 @@
  * 6. Content - Landmarks, NPCs, quests
  */
 
-import { sampleElevation } from '../src/terrain/elevation.js';
-import { findHalfCellAt, extractHalfCellBoundary, clearHalfCellCache, computeHalfCellPolygons } from '../src/geometry/voronoi.js';
-import { getSide, getHalfCellId, getHalfCellConfig, getHalfCells } from '../src/terrain/spine.js';
+import { sampleElevation, SEA_LEVEL } from '../src/terrain/elevation.js';
+import { createBlob, generateBlobId, PROFILES, PROFILE_NAMES } from '../src/terrain/blob.js';
+import { computeBlobCells, findBlobAt, findNearestBlob, clearCellCache } from '../src/geometry/voronoi.js';
 import { extractContours, simplifyPolyline } from '../src/geometry/contour.js';
-import {
-  extractCoastline,
-  DEFAULT_COASTLINE_CONFIG
-} from '../src/terrain/coastline.js';
+import { extractCoastline, DEFAULT_COASTLINE_CONFIG } from '../src/terrain/coastline.js';
 import { createFBmNoise, unipolar } from '../src/core/noise.js';
 import { deriveSeed } from '../src/core/seeds.js';
 import { generateHydrology, DEFAULT_HYDROLOGY_CONFIG } from '../src/terrain/hydrology.js';
@@ -30,28 +27,36 @@ import { createManualLake } from '../src/terrain/lakes.js';
 
 const state = {
   // Current editor state
-  currentTab: 'spines',
+  currentTab: 'terrain',
   currentTool: 'select',
   seed: 42,
-  
+
+  // Tool defaults (for new blobs)
+  toolDefaults: {
+    elevation: 0.5,
+    radius: 0.25,
+    profile: 'cone'
+  },
+
   // Template being edited
   template: {
-    spines: [],
-    halfCells: {},
+    blobs: [],
     defaults: {
-      profile: 'ramp',
-      baseElevation: 0,  // Profile slopes to sea floor; coastline is at SEA_LEVEL (0.1)
-      falloffCurve: 0.5,
+      seaLevel: SEA_LEVEL,
+      profile: 'cone',
+      baseElevation: 0,
       noise: { roughness: 0.3, featureScale: 0.2 },
+      surfaceNoise: { enabled: true, roughness: 0.3, featureScale: 0.1 },
+      ridgeNoise: { enabled: false },
       warp: {
-        enabled: false,   // Disabled in Phase 1 (Spines) - enable in Phase 2 (Noise)
-        strength: 0.05,   // Maximum displacement in normalized units
-        scale: 0.015,     // Noise frequency (lower = larger features)
+        enabled: false,
+        strength: 0.05,
+        scale: 0.015,
         octaves: 2
       },
       microDetail: {
         enabled: true,
-        amplitude: 0.02   // Small-scale surface texture
+        amplitude: 0.02
       }
     },
     climate: {},
@@ -60,30 +65,27 @@ const state = {
     landmarks: [],
     naming: { palette: 'pastoral-english' }
   },
-  
+
   // View state
   view: {
     offsetX: 0,
     offsetY: 0,
     zoom: 1
   },
-  
+
   // Interaction state
-  selectedSpine: null,
-  selectedVertex: null,
-  selectedHalfCell: null,
-  hoveredHalfCell: null,
-  isDrawing: false,
-  drawingSpine: null,
+  selectedBlob: null,
+  hoveredBlob: null,
   isDragging: false,
+  isDraggingRadius: false,
   isPanning: false,
   panStart: { x: 0, y: 0 },
-  hoveredSpine: null,
   mousePos: { x: 0, y: 0 },
 
   // Display options
   showElevation: true,
   showElevationContours: false,
+  showVoronoiCells: true,
 
   // Hydrology state (Tab 3)
   hydrology: {
@@ -93,7 +95,6 @@ const state = {
     flowGrid: null,
     config: { ...DEFAULT_HYDROLOGY_CONFIG, autoDetect: false },
     cacheKey: null,
-    // Display options
     showFlowGrid: false,
     showWatersheds: false,
     showWaterSources: true
@@ -103,11 +104,11 @@ const state = {
   selectedSource: null,
   selectedLake: null,
 
-  // Contour cache (invalidated when spines/profiles change)
+  // Contour cache
   cache: {
     coastlinePolylines: null,
     elevationContours: null,
-    cellBoundaries: null,  // Map: "spineId:vertexIndex:side" → polylines[]
+    voronoiCells: null,
     cacheKey: null
   }
 };
@@ -120,17 +121,13 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 
 function resizeCanvas() {
-  // Get the canvas's actual displayed size
   const rect = canvas.getBoundingClientRect();
-
-  // Set canvas internal resolution to match displayed size (round to integers)
   const width = Math.round(rect.width);
   const height = Math.round(rect.height);
 
   canvas.width = width;
   canvas.height = height;
 
-  // Center the view
   state.view.offsetX = width / 2;
   state.view.offsetY = height / 2;
   state.view.zoom = Math.min(width, height) / 2.5;
@@ -138,9 +135,6 @@ function resizeCanvas() {
   render();
 }
 
-/**
- * Get mouse coordinates relative to canvas, accounting for any CSS scaling
- */
 function getMousePos(e) {
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
@@ -172,33 +166,13 @@ function canvasToWorld(cx, cy) {
 }
 
 // =============================================================================
-// World Building (for elevation sampling)
+// World Building
 // =============================================================================
 
-/**
- * Build a world object from template state for elevation sampling
- */
 function buildWorld() {
-  const seeds = [];
-  for (const spine of state.template.spines) {
-    for (const v of spine.vertices) {
-      seeds.push({
-        x: v.x,
-        z: v.z,
-        spineId: spine.id,
-        elevation: v.elevation,
-        // Influence in world space: UI stores as percentage of world (0-100 → 0-1)
-        // Default 30 means influence extends 0.3 world units from spine
-        influence: v.influence / 100
-      });
-    }
-  }
-
   return {
     seed: state.seed,
-    voronoi: { seeds },
-    template: { spines: state.template.spines },
-    halfCells: state.template.halfCells,
+    template: { blobs: state.template.blobs },
     defaults: state.template.defaults
   };
 }
@@ -207,25 +181,16 @@ function buildWorld() {
 // Noise Sampling (Tab 2)
 // =============================================================================
 
-/**
- * Cache for terrain noise generator, keyed by seed + config hash
- */
 let noiseCache = {
   cacheKey: null,
   noiseFn: null
 };
 
-/**
- * Get or create a terrain noise function
- * @param {Object} world - World object with seed and noise config
- * @returns {(x: number, z: number) => number} Noise function returning [0, 1]
- */
 function getTerrainNoise(world) {
   const noiseConfig = world.defaults?.noise ?? { roughness: 0.3, featureScale: 0.2 };
   const cacheKey = `${world.seed}|${noiseConfig.roughness}|${noiseConfig.featureScale}`;
 
   if (noiseCache.cacheKey !== cacheKey) {
-    // Create new noise function
     const noiseSeed = deriveSeed(world.seed, 'terrainNoise');
     const baseFn = createFBmNoise(noiseSeed, {
       octaves: 4,
@@ -240,14 +205,6 @@ function getTerrainNoise(world) {
   return noiseCache.noiseFn;
 }
 
-/**
- * Sample elevation with optional terrain noise applied
- * @param {Object} world - World object
- * @param {number} x - World X coordinate
- * @param {number} z - World Z coordinate
- * @param {boolean} applyNoise - Whether to apply terrain noise
- * @returns {number} Elevation in [0, 1]
- */
 function sampleElevationWithNoise(world, x, z, applyNoise) {
   const baseElevation = sampleElevation(world, x, z);
 
@@ -257,50 +214,30 @@ function sampleElevationWithNoise(world, x, z, applyNoise) {
 
   const noiseConfig = world.defaults?.noise ?? { roughness: 0.3, featureScale: 0.2 };
   const noiseFn = getTerrainNoise(world);
-
-  // Sample noise at this position
   const noiseValue = noiseFn(x, z);
 
-  // Scale noise by roughness - noise adds detail on top of base terrain
-  // Only apply noise above sea level, scale by distance from sea level
-  const seaLevel = 0.1;
-  if (baseElevation <= seaLevel) {
+  if (baseElevation <= SEA_LEVEL) {
     return baseElevation;
   }
 
-  // Noise amplitude scales with roughness and land height
-  const landHeight = baseElevation - seaLevel;
-  const amplitude = noiseConfig.roughness * 0.15; // Max 15% elevation variation
-
-  // Apply noise centered on base elevation
+  const landHeight = baseElevation - SEA_LEVEL;
+  const amplitude = noiseConfig.roughness * 0.15;
   const noisyElevation = baseElevation + (noiseValue - 0.5) * 2 * amplitude * landHeight;
 
-  // Clamp to valid range, ensuring we don't go below sea level
-  return Math.max(seaLevel, Math.min(1, noisyElevation));
+  return Math.max(SEA_LEVEL, Math.min(1, noisyElevation));
 }
 
-/**
- * Convert elevation value to color
- * 0.0 = deep ocean (not drawn, background shows)
- * 0.0-0.1 = shallow ocean (light blue gradient)
- * 0.1+ = land (green → brown → white)
- */
 function elevationToColor(e) {
-  const seaLevel = 0.1;
-  if (e < seaLevel) {
-    // Shallow ocean: lighter blue near shore, darker toward deep
-    // t goes from 0 (deep) to 1 (shoreline)
-    const t = e / seaLevel;
+  if (e < SEA_LEVEL) {
+    const t = e / SEA_LEVEL;
     return [
-      Math.floor(40 + t * 60),   // 40 → 100
-      Math.floor(80 + t * 100),  // 80 → 180
-      Math.floor(140 + t * 80)   // 140 → 220
+      Math.floor(40 + t * 60),
+      Math.floor(80 + t * 100),
+      Math.floor(140 + t * 80)
     ];
   } else {
-    // Land: green → brown → white
-    const t = (e - seaLevel) / (1 - seaLevel);
+    const t = (e - SEA_LEVEL) / (1 - SEA_LEVEL);
     if (t < 0.4) {
-      // Green lowlands
       const s = t / 0.4;
       return [
         Math.floor(34 + s * 50),
@@ -308,7 +245,6 @@ function elevationToColor(e) {
         Math.floor(34 + s * 20)
       ];
     } else if (t < 0.7) {
-      // Brown hills
       const s = (t - 0.4) / 0.3;
       return [
         Math.floor(84 + s * 55),
@@ -316,7 +252,6 @@ function elevationToColor(e) {
         Math.floor(54 - s * 20)
       ];
     } else {
-      // White peaks
       const s = (t - 0.7) / 0.3;
       return [
         Math.floor(139 + s * 116),
@@ -331,135 +266,79 @@ function elevationToColor(e) {
 // Rendering
 // =============================================================================
 
-/**
- * Generate cache key for contour invalidation
- * Includes all factors that affect contour geometry and view bounds
- */
 function getContourCacheKey() {
-  const spineData = JSON.stringify(state.template.spines.map(s => ({
-    id: s.id,
-    vertices: s.vertices.map(v => ({
-      x: v.x, z: v.z, elevation: v.elevation, influence: v.influence
-    }))
+  const blobData = JSON.stringify(state.template.blobs.map(b => ({
+    id: b.id, x: b.x, z: b.z, elevation: b.elevation, radius: b.radius, profile: b.profile
   })));
-  const halfCellData = JSON.stringify(state.template.halfCells);
   const defaults = JSON.stringify(state.template.defaults);
-  // Include view state for infinite canvas (contours depend on visible area)
   const viewData = `${state.view.offsetX.toFixed(0)},${state.view.offsetY.toFixed(0)},${state.view.zoom.toFixed(0)}`;
-  return `${spineData}|${halfCellData}|${defaults}|${viewData}`;
+  return `${blobData}|${defaults}|${viewData}`;
 }
 
-/**
- * Invalidate contour cache if source data has changed
- */
 function invalidateContourCacheIfNeeded() {
   const currentKey = getContourCacheKey();
   if (state.cache.cacheKey !== currentKey) {
     state.cache.coastlinePolylines = null;
     state.cache.elevationContours = null;
-    state.cache.cellBoundaries = null;
+    state.cache.voronoiCells = null;
     state.cache.cacheKey = currentKey;
-    // Also clear the Voronoi half-cell cache
-    clearHalfCellCache();
+    clearCellCache();
   }
 }
 
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-
   invalidateContourCacheIfNeeded();
 
-  // Hydrology only updates when explicitly triggered (button or on Tab 3+)
-  // Note: We no longer auto-update here - user must click "Simulate Water"
-
-  // Layer 1: Ocean fill (solid blue over world bounds)
   drawOceanFill();
-
-  // Layer 2: Land elevation (only where elevation > sea level)
   drawLandElevation();
 
-  // Layer 3: Optional elevation contours
   if (state.showElevationContours) {
     drawElevationContours();
   }
 
-  // Layer 4: Coastline (vector strokes)
   drawCoastlinePolygons();
 
-  // Layer 5: Flow grid debug overlay (Tab 3 only)
   if (state.currentTab === 'hydrology') {
     drawFlowGrid();
   }
 
-  // Layer 6: Lakes (Tab 3+ only - hydrology and beyond)
   if (state.currentTab === 'hydrology' || state.currentTab === 'climate' ||
       state.currentTab === 'zones' || state.currentTab === 'content') {
     drawLakes();
-  }
-
-  // Layer 7: Rivers (Tab 3+ only - hydrology and beyond)
-  if (state.currentTab === 'hydrology' || state.currentTab === 'climate' ||
-      state.currentTab === 'zones' || state.currentTab === 'content') {
     drawRivers();
   }
 
-  // Layer 8: Water sources (Tab 3 only when enabled)
   if (state.currentTab === 'hydrology') {
     drawWaterSources();
   }
 
-  // Layer 9: Cell boundaries (dashed lines for all cells)
-  drawCellBoundaries();
-
-  // Layer 10: Hovered cell highlight (cyan) - only if different from selected
-  if (state.hoveredHalfCell && !halfCellsEqual(state.hoveredHalfCell, state.selectedHalfCell)) {
-    drawHighlightedCell(state.hoveredHalfCell, 'rgba(78, 205, 196, 0.2)', '#4ecdc4');
+  if (state.showVoronoiCells) {
+    drawVoronoiCells();
   }
 
-  // Layer 11: Selected cell highlight (red)
-  if (state.selectedHalfCell) {
-    drawHighlightedCell(state.selectedHalfCell, 'rgba(233, 69, 96, 0.3)', '#e94560');
-  }
-
-  // Layer 12: Grid, boundary, spines, vertices
   drawGrid();
   drawWorldBoundary();
-  drawSpines();
-  drawVertices();
+  drawBlobs();
+  drawCursorPreview();
 
-  // Update UI
   updatePropertiesPanel();
 }
 
-/**
- * Draw ocean fill over entire canvas
- */
 function drawOceanFill() {
-  ctx.fillStyle = '#1a4c6e'; // Ocean blue (per spec)
+  ctx.fillStyle = '#1a4c6e';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
-/**
- * Draw terrain elevation as color-coded rectangles with hillshade
- * Draws land AND shallow ocean (elevation > 0), deep ocean (0) shows through
- */
 function drawLandElevation() {
-  if (!state.showElevation || state.template.spines.length === 0) return;
+  if (!state.showElevation || state.template.blobs.length === 0) return;
 
   const world = buildWorld();
-  const step = 4; // Sample every 4 pixels
-
-  // Phase 1 (spines) = idealized/clean, Phase 2+ (noise) = noisy
-  const applyNoise = state.currentTab !== 'spines';
-
-  // Hillshade setup
-  // Gradient offset in world units (half a pixel step)
+  const step = 4;
+  const applyNoise = state.currentTab !== 'terrain';
   const gradientOffset = step * 0.5 / state.view.zoom;
+  const lightDir = { x: -0.577, y: 0.577, z: -0.577 };
 
-  // Light direction (from NW above) - pre-normalized
-  const lightDir = { x: -0.577, y: 0.577, z: -0.577 }; // normalized (-1,1,-1)
-
-  // Helper to sample elevation based on current phase
   const sample = (wx, wz) => applyNoise
     ? sampleElevationWithNoise(world, wx, wz, true)
     : sampleElevation(world, wx, wz);
@@ -467,33 +346,23 @@ function drawLandElevation() {
   for (let cy = 0; cy < canvas.height; cy += step) {
     for (let cx = 0; cx < canvas.width; cx += step) {
       const { x, z } = canvasToWorld(cx, cy);
-
       const elevation = sample(x, z);
 
-      // Skip deep ocean (elevation = 0) - ocean fill shows through
       if (elevation <= 0) continue;
 
-      // Compute hillshade using finite difference gradients
       const elevE = sample(x + gradientOffset, z);
       const elevS = sample(x, z + gradientOffset);
-
       const dEdx = (elevE - elevation) / gradientOffset;
       const dEdz = (elevS - elevation) / gradientOffset;
 
-      // Surface normal: (-dE/dx, 1, -dE/dz) with slope exaggeration
-      const slopeScale = 3.0; // Exaggerate slopes for visual clarity
+      const slopeScale = 3.0;
       const nx = -dEdx * slopeScale;
       const ny = 1;
       const nz = -dEdz * slopeScale;
       const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
-
-      // Dot product with light direction (light is pre-normalized)
       const dot = (nx * lightDir.x + ny * lightDir.y + nz * lightDir.z) / nLen;
-
-      // Shade factor: map dot product to [0.5, 1.0] range for subtle effect
       const shade = 0.5 + 0.5 * Math.max(0, dot);
 
-      // Get base color and apply hillshade
       const [r, g, b] = elevationToColor(elevation);
       ctx.fillStyle = `rgb(${Math.round(r * shade)}, ${Math.round(g * shade)}, ${Math.round(b * shade)})`;
       ctx.fillRect(cx, cy, step, step);
@@ -501,9 +370,6 @@ function drawLandElevation() {
   }
 }
 
-/**
- * Get visible world bounds from canvas
- */
 function getVisibleBounds() {
   const topLeft = canvasToWorld(0, 0);
   const bottomRight = canvasToWorld(canvas.width, canvas.height);
@@ -515,17 +381,11 @@ function getVisibleBounds() {
   };
 }
 
-/**
- * Draw coastline as connected polylines using cached contours
- */
 function drawCoastlinePolygons() {
-  if (state.template.spines.length === 0) return;
+  if (state.template.blobs.length === 0) return;
 
-  // Extract contours if not cached
   if (!state.cache.coastlinePolylines) {
     const world = buildWorld();
-
-    // Use visible bounds (with margin for smooth edges)
     const visible = getVisibleBounds();
     const margin = 0.2;
     const bounds = {
@@ -535,10 +395,7 @@ function drawCoastlinePolygons() {
       maxZ: visible.maxZ + margin
     };
 
-    // Phase 1 (spines) = smooth coastline, Phase 2+ (noise) = noisy coastline
-    const includeNoise = state.currentTab !== 'spines';
-
-    // Use the coastline module for extraction
+    const includeNoise = state.currentTab !== 'terrain';
     const polylines = extractCoastline(world, bounds, {
       includeNoise,
       resolution: DEFAULT_COASTLINE_CONFIG.resolution,
@@ -548,8 +405,7 @@ function drawCoastlinePolygons() {
     state.cache.coastlinePolylines = polylines;
   }
 
-  // Render polylines as smooth vector strokes
-  ctx.strokeStyle = '#4ecdc4'; // Cyan (spec color)
+  ctx.strokeStyle = '#4ecdc4';
   ctx.lineWidth = 2.5;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -570,18 +426,12 @@ function drawCoastlinePolygons() {
   }
 }
 
-/**
- * Draw optional elevation contours (topographic lines)
- */
 function drawElevationContours() {
-  if (state.template.spines.length === 0) return;
+  if (state.template.blobs.length === 0) return;
 
   const world = buildWorld();
-  const seaLevel = world.defaults?.baseElevation ?? 0.1;
 
-  // Extract contours if not cached
   if (!state.cache.elevationContours) {
-    // Use visible bounds (with margin)
     const visible = getVisibleBounds();
     const margin = 0.1;
     const bounds = {
@@ -590,29 +440,24 @@ function drawElevationContours() {
       minZ: visible.minZ - margin,
       maxZ: visible.maxZ + margin
     };
-    const resolution = 0.03; // Slightly coarser for performance
-
-    // Contour levels above sea level (every 0.1)
+    const resolution = 0.03;
     const levels = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
     const sampleFn = (x, z) => sampleElevation(world, x, z);
 
     state.cache.elevationContours = new Map();
 
     for (const level of levels) {
-      if (level <= seaLevel) continue; // Skip underwater contours
-
+      if (level <= SEA_LEVEL) continue;
       let polylines = extractContours(sampleFn, level, bounds, resolution);
       polylines = polylines.map(pl => simplifyPolyline(pl, 0.008));
       state.cache.elevationContours.set(level, polylines);
     }
   }
 
-  // Render contours (thin, semi-transparent)
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
   for (const [level, polylines] of state.cache.elevationContours) {
-    // Progressively lighter/thinner strokes at higher elevations
     ctx.strokeStyle = `rgba(255, 255, 255, ${0.15 + level * 0.2})`;
     ctx.lineWidth = 1;
 
@@ -633,105 +478,37 @@ function drawElevationContours() {
   }
 }
 
-/**
- * Check if two half-cell references are equal
- */
-function halfCellsEqual(a, b) {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  return a.spineId === b.spineId &&
-         a.vertexIndex === b.vertexIndex &&
-         a.side === b.side;
-}
+function drawVoronoiCells() {
+  if (state.template.blobs.length === 0) return;
 
-/**
- * Draw dashed boundaries for all half-cells
- */
-function drawCellBoundaries() {
-  if (state.template.spines.length === 0) return;
-
-  // Initialize cache if needed
-  if (!state.cache.cellBoundaries) {
-    state.cache.cellBoundaries = new Map();
-  }
-
-  // Get visible bounds with large margin for Voronoi computation
-  // Voronoi cells need to extend beyond visible area for correct boundaries
-  const topLeft = canvasToWorld(0, 0);
-  const bottomRight = canvasToWorld(canvas.width, canvas.height);
+  const visible = getVisibleBounds();
   const bounds = {
-    minX: Math.min(-10, topLeft.x - 1),
-    maxX: Math.max(10, bottomRight.x + 1),
-    minZ: Math.min(-10, topLeft.z - 1),
-    maxZ: Math.max(10, bottomRight.z + 1)
+    minX: Math.min(-10, visible.minX - 1),
+    maxX: Math.max(10, visible.maxX + 1),
+    minZ: Math.min(-10, visible.minZ - 1),
+    maxZ: Math.max(10, visible.maxZ + 1)
   };
 
+  const cells = computeBlobCells(state.template.blobs, bounds);
+
   ctx.save();
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
   ctx.setLineDash([4, 4]);
   ctx.lineWidth = 1;
 
-  for (const spine of state.template.spines) {
-    const halfCells = getHalfCells(spine);
-    for (const hc of halfCells) {
-      const cacheKey = getHalfCellId(spine.id, hc.vertexIndex, hc.side);
+  for (const [blobId, polygon] of cells) {
+    if (!polygon || polygon.length < 3) continue;
 
-      let polylines = state.cache.cellBoundaries.get(cacheKey);
-      if (!polylines) {
-        polylines = extractHalfCellBoundary(
-          spine.id, hc.vertexIndex, hc.side,
-          state.template.spines, null,
-          bounds
-        );
-        state.cache.cellBoundaries.set(cacheKey, polylines);
-      }
-
-      // Draw polylines
-      for (const polyline of polylines) {
-        if (polyline.length < 2) continue;
-        ctx.beginPath();
-        const first = worldToCanvas(polyline[0].x, polyline[0].z);
-        ctx.moveTo(first.x, first.y);
-        for (let i = 1; i < polyline.length; i++) {
-          const p = worldToCanvas(polyline[i].x, polyline[i].z);
-          ctx.lineTo(p.x, p.y);
-        }
-        ctx.stroke();
-      }
-    }
-  }
-
-  ctx.restore();
-}
-
-/**
- * Draw a highlighted half-cell with fill and stroke
- */
-function drawHighlightedCell(halfCell, fillColor, strokeColor) {
-  if (!halfCell) return;
-  if (!state.cache.cellBoundaries) return;
-
-  const cacheKey = getHalfCellId(halfCell.spineId, halfCell.vertexIndex, halfCell.side);
-  const polylines = state.cache.cellBoundaries.get(cacheKey);
-  if (!polylines || polylines.length === 0) return;
-
-  ctx.save();
-  ctx.fillStyle = fillColor;
-  ctx.strokeStyle = strokeColor;
-  ctx.lineWidth = 2;
-  ctx.setLineDash([]);  // Solid line
-
-  for (const polyline of polylines) {
-    if (polyline.length < 3) continue;
     ctx.beginPath();
-    const first = worldToCanvas(polyline[0].x, polyline[0].z);
+    const first = worldToCanvas(polygon[0].x, polygon[0].z);
     ctx.moveTo(first.x, first.y);
-    for (let i = 1; i < polyline.length; i++) {
-      const p = worldToCanvas(polyline[i].x, polyline[i].z);
+
+    for (let i = 1; i < polygon.length; i++) {
+      const p = worldToCanvas(polygon[i].x, polygon[i].z);
       ctx.lineTo(p.x, p.y);
     }
+
     ctx.closePath();
-    ctx.fill();
     ctx.stroke();
   }
 
@@ -742,22 +519,18 @@ function drawGrid() {
   const minorStep = 0.2;
   const majorStep = 1.0;
 
-  // Calculate visible world bounds from canvas
   const topLeft = canvasToWorld(0, 0);
   const bottomRight = canvasToWorld(canvas.width, canvas.height);
 
-  // Extend bounds slightly and snap to grid
   const minX = Math.floor(topLeft.x / minorStep) * minorStep;
   const maxX = Math.ceil(bottomRight.x / minorStep) * minorStep;
   const minZ = Math.floor(topLeft.z / minorStep) * minorStep;
   const maxZ = Math.ceil(bottomRight.z / minorStep) * minorStep;
 
-  // Draw minor grid lines
   ctx.strokeStyle = '#1a2a4a';
   ctx.lineWidth = 1;
 
   for (let x = minX; x <= maxX; x += minorStep) {
-    // Skip major lines (will draw them separately)
     if (Math.abs(x % majorStep) < 0.001) continue;
     const p1 = worldToCanvas(x, minZ);
     const p2 = worldToCanvas(x, maxZ);
@@ -777,7 +550,6 @@ function drawGrid() {
     ctx.stroke();
   }
 
-  // Draw major grid lines (every 1.0 unit)
   ctx.strokeStyle = '#2a3a5a';
   ctx.lineWidth = 2;
 
@@ -799,11 +571,9 @@ function drawGrid() {
     ctx.stroke();
   }
 
-  // Draw origin axes (x=0 and z=0) with distinct color
   ctx.strokeStyle = '#3a4a6a';
   ctx.lineWidth = 2;
 
-  // X axis (z=0)
   if (minZ <= 0 && maxZ >= 0) {
     const p1 = worldToCanvas(minX, 0);
     const p2 = worldToCanvas(maxX, 0);
@@ -813,7 +583,6 @@ function drawGrid() {
     ctx.stroke();
   }
 
-  // Z axis (x=0)
   if (minX <= 0 && maxX >= 0) {
     const p1 = worldToCanvas(0, minZ);
     const p2 = worldToCanvas(0, maxZ);
@@ -827,137 +596,89 @@ function drawGrid() {
 function drawWorldBoundary() {
   const tl = worldToCanvas(-1, -1);
   const br = worldToCanvas(1, 1);
-  
+
   ctx.strokeStyle = '#0f3460';
   ctx.lineWidth = 2;
   ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
 }
 
-function drawSpines() {
-  for (const spine of state.template.spines) {
-    if (spine.vertices.length < 2) continue;
+function drawBlobs() {
+  for (const blob of state.template.blobs) {
+    const p = worldToCanvas(blob.x, blob.z);
+    const isSelected = blob === state.selectedBlob;
+    const isHovered = blob === state.hoveredBlob;
 
+    // Draw radius circle
     ctx.beginPath();
-    const first = worldToCanvas(spine.vertices[0].x, spine.vertices[0].z);
-    ctx.moveTo(first.x, first.y);
-
-    for (let i = 1; i < spine.vertices.length; i++) {
-      const p = worldToCanvas(spine.vertices[i].x, spine.vertices[i].z);
-      ctx.lineTo(p.x, p.y);
+    ctx.arc(p.x, p.y, blob.radius * state.view.zoom, 0, Math.PI * 2);
+    if (isSelected) {
+      ctx.strokeStyle = '#e94560';
+      ctx.lineWidth = 2;
+    } else if (isHovered) {
+      ctx.strokeStyle = '#4ecdc4';
+      ctx.lineWidth = 2;
+    } else {
+      ctx.strokeStyle = 'rgba(74, 159, 255, 0.4)';
+      ctx.lineWidth = 1;
     }
-
-    // Determine spine color based on state
-    let strokeStyle = '#4a9fff';
-    let lineWidth = 3;
-    if (spine === state.hoveredSpine && state.currentTool === 'delete') {
-      strokeStyle = '#ff4444';
-      lineWidth = 5;
-    } else if (spine === state.selectedSpine) {
-      strokeStyle = '#e94560';
-    }
-
-    ctx.strokeStyle = strokeStyle;
-    ctx.lineWidth = lineWidth;
     ctx.stroke();
-  }
-  
-  // Drawing in progress
-  if (state.isDrawing && state.drawingSpine && state.drawingSpine.vertices.length > 0) {
-    // Draw existing vertices
+
+    // Draw center point
     ctx.beginPath();
-    const first = worldToCanvas(state.drawingSpine.vertices[0].x, state.drawingSpine.vertices[0].z);
-    ctx.moveTo(first.x, first.y);
+    ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
+    ctx.fillStyle = isSelected ? '#e94560' : (isHovered ? '#4ecdc4' : '#4a9fff');
+    ctx.fill();
 
-    for (let i = 1; i < state.drawingSpine.vertices.length; i++) {
-      const p = worldToCanvas(state.drawingSpine.vertices[i].x, state.drawingSpine.vertices[i].z);
-      ctx.lineTo(p.x, p.y);
-    }
+    // Elevation label
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(blob.elevation.toFixed(2), p.x, p.y - 14);
 
-    ctx.strokeStyle = '#e94560';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([5, 5]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Draw rubberband to mouse position
-    const last = state.drawingSpine.vertices[state.drawingSpine.vertices.length - 1];
-    const lastCanvas = worldToCanvas(last.x, last.z);
-    ctx.beginPath();
-    ctx.moveTo(lastCanvas.x, lastCanvas.y);
-    ctx.lineTo(state.mousePos.x, state.mousePos.y);
-    ctx.strokeStyle = 'rgba(233, 69, 96, 0.5)';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([3, 3]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Draw vertex markers for in-progress spine
-    for (const v of state.drawingSpine.vertices) {
-      const p = worldToCanvas(v.x, v.z);
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = '#e94560';
-      ctx.fill();
-    }
+    // Profile indicator (small text)
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.font = '9px sans-serif';
+    ctx.fillText(blob.profile, p.x, p.y + 20);
   }
 }
 
-function drawVertices() {
-  for (const spine of state.template.spines) {
-    for (let i = 0; i < spine.vertices.length; i++) {
-      const v = spine.vertices[i];
-      const p = worldToCanvas(v.x, v.z);
-      
-      // Influence radius
-      ctx.beginPath();
-      // Influence radius: value is percentage (30 = 0.3 world units)
-      ctx.arc(p.x, p.y, (v.influence / 100) * state.view.zoom, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(74, 159, 255, 0.3)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      
-      // Vertex point
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
-      ctx.fillStyle = (state.selectedSpine === spine && state.selectedVertex === i) 
-        ? '#e94560' 
-        : '#4a9fff';
-      ctx.fill();
-      
-      // Elevation indicator (height of vertex)
-      ctx.fillStyle = '#fff';
-      ctx.font = '10px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(v.elevation.toFixed(2), p.x, p.y - 14);
-    }
-  }
+function drawCursorPreview() {
+  if (state.currentTool !== 'add' || state.isPanning || state.isDragging) return;
+
+  const { x, z } = canvasToWorld(state.mousePos.x, state.mousePos.y);
+  const p = worldToCanvas(x, z);
+
+  // Ghost radius circle
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, state.toolDefaults.radius * state.view.zoom, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(233, 69, 96, 0.4)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Ghost center
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(233, 69, 96, 0.5)';
+  ctx.fill();
 }
 
 // =============================================================================
 // Hydrology Rendering (Tab 3)
 // =============================================================================
 
-/**
- * Generate cache key for hydrology invalidation
- */
 function getHydrologyCacheKey() {
-  const spineData = JSON.stringify(state.template.spines.map(s => ({
-    id: s.id,
-    vertices: s.vertices.map(v => ({
-      x: v.x, z: v.z, elevation: v.elevation, influence: v.influence
-    }))
+  const blobData = JSON.stringify(state.template.blobs.map(b => ({
+    id: b.id, x: b.x, z: b.z, elevation: b.elevation, radius: b.radius, profile: b.profile
   })));
-  const halfCellData = JSON.stringify(state.template.halfCells);
   const configData = JSON.stringify(state.hydrology.config);
   const sourcesData = JSON.stringify(state.hydrology.waterSources.filter(s => s.origin === 'manual'));
-  return `${state.seed}|${spineData}|${halfCellData}|${configData}|${sourcesData}`;
+  return `${state.seed}|${blobData}|${configData}|${sourcesData}`;
 }
 
-/**
- * Run hydrology simulation explicitly (triggered by button)
- */
 function runHydrologySimulation() {
-  if (state.template.spines.length === 0) {
+  if (state.template.blobs.length === 0) {
     state.hydrology.rivers = [];
     state.hydrology.lakes = [];
     state.hydrology.waterSources = [];
@@ -966,13 +687,11 @@ function runHydrologySimulation() {
     return;
   }
 
-  // Build world for hydrology generation
   const world = buildWorld();
   world.hydrologyConfig = state.hydrology.config;
   world.waterSources = state.hydrology.waterSources.filter(s => s.origin === 'manual');
   world.lakes = state.hydrology.lakes.filter(l => l.origin === 'manual');
 
-  // Calculate bounds from terrain - find the extent of all spines with margin
   const bounds = calculateTerrainBounds();
 
   try {
@@ -992,29 +711,21 @@ function runHydrologySimulation() {
   render();
 }
 
-/**
- * Calculate terrain bounds from spines (for flow grid)
- */
 function calculateTerrainBounds() {
-  if (state.template.spines.length === 0) {
+  if (state.template.blobs.length === 0) {
     return { minX: -1, maxX: 1, minZ: -1, maxZ: 1 };
   }
 
   let minX = Infinity, maxX = -Infinity;
   let minZ = Infinity, maxZ = -Infinity;
 
-  for (const spine of state.template.spines) {
-    for (const v of spine.vertices) {
-      // Include influence radius in bounds
-      const radius = v.influence / 100; // Convert from percentage
-      minX = Math.min(minX, v.x - radius);
-      maxX = Math.max(maxX, v.x + radius);
-      minZ = Math.min(minZ, v.z - radius);
-      maxZ = Math.max(maxZ, v.z + radius);
-    }
+  for (const blob of state.template.blobs) {
+    minX = Math.min(minX, blob.x - blob.radius);
+    maxX = Math.max(maxX, blob.x + blob.radius);
+    minZ = Math.min(minZ, blob.z - blob.radius);
+    maxZ = Math.max(maxZ, blob.z + blob.radius);
   }
 
-  // Add margin for edge effects
   const margin = 0.1;
   return {
     minX: minX - margin,
@@ -1024,9 +735,6 @@ function calculateTerrainBounds() {
   };
 }
 
-/**
- * Draw rivers as blue polylines with variable width
- */
 function drawRivers() {
   const rivers = state.hydrology.rivers;
   if (!rivers || rivers.length === 0) return;
@@ -1037,7 +745,6 @@ function drawRivers() {
   for (const river of rivers) {
     if (!river.vertices || river.vertices.length < 2) continue;
 
-    // Draw river as series of segments with varying width
     for (let i = 0; i < river.vertices.length - 1; i++) {
       const v0 = river.vertices[i];
       const v1 = river.vertices[i + 1];
@@ -1045,7 +752,6 @@ function drawRivers() {
       const p0 = worldToCanvas(v0.x, v0.z);
       const p1 = worldToCanvas(v1.x, v1.z);
 
-      // Width in canvas pixels
       const width0 = Math.max(1, v0.width * state.view.zoom);
       const width1 = Math.max(1, v1.width * state.view.zoom);
       const avgWidth = (width0 + width1) / 2;
@@ -1054,7 +760,6 @@ function drawRivers() {
       ctx.moveTo(p0.x, p0.y);
       ctx.lineTo(p1.x, p1.y);
 
-      // River color - lighter for wider rivers
       const alpha = Math.min(0.9, 0.5 + avgWidth / 20);
       ctx.strokeStyle = `rgba(64, 164, 223, ${alpha})`;
       ctx.lineWidth = avgWidth;
@@ -1063,16 +768,12 @@ function drawRivers() {
   }
 }
 
-/**
- * Draw lakes as filled polygons
- */
 function drawLakes() {
   const lakes = state.hydrology.lakes;
   if (!lakes || lakes.length === 0) return;
 
   for (const lake of lakes) {
     if (!lake.boundary || lake.boundary.length < 3) {
-      // Fallback: draw as circle if no boundary
       const p = worldToCanvas(lake.x, lake.z);
       const radius = Math.sqrt(lake.area) * state.view.zoom * 0.5;
 
@@ -1086,7 +787,6 @@ function drawLakes() {
       continue;
     }
 
-    // Draw boundary polygon
     ctx.beginPath();
     const first = worldToCanvas(lake.boundary[0].x, lake.boundary[0].z);
     ctx.moveTo(first.x, first.y);
@@ -1097,7 +797,6 @@ function drawLakes() {
     }
     ctx.closePath();
 
-    // Fill and stroke
     ctx.fillStyle = lake === state.selectedLake
       ? 'rgba(233, 69, 96, 0.4)'
       : 'rgba(64, 164, 223, 0.6)';
@@ -1107,7 +806,6 @@ function drawLakes() {
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    // Draw endorheic indicator
     if (lake.endorheic) {
       const center = worldToCanvas(lake.x, lake.z);
       ctx.fillStyle = '#fff';
@@ -1118,9 +816,6 @@ function drawLakes() {
   }
 }
 
-/**
- * Draw water sources as markers
- */
 function drawWaterSources() {
   if (!state.hydrology.showWaterSources) return;
 
@@ -1130,7 +825,6 @@ function drawWaterSources() {
   for (const source of sources) {
     const p = worldToCanvas(source.x, source.z);
 
-    // Draw marker
     ctx.beginPath();
     ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
 
@@ -1147,7 +841,6 @@ function drawWaterSources() {
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    // Flow rate indicator
     if (state.currentTab === 'hydrology') {
       ctx.fillStyle = '#fff';
       ctx.font = '10px sans-serif';
@@ -1157,9 +850,6 @@ function drawWaterSources() {
   }
 }
 
-/**
- * Draw flow grid debug overlay
- */
 function drawFlowGrid() {
   if (!state.hydrology.showFlowGrid) return;
 
@@ -1167,9 +857,8 @@ function drawFlowGrid() {
   if (!grid) return;
 
   const cellSize = grid.resolution * state.view.zoom;
-  if (cellSize < 2) return; // Too small to render
+  if (cellSize < 2) return;
 
-  // Draw flow accumulation as heat map
   let maxAccum = 1;
   for (let i = 0; i < grid.accumulation.length; i++) {
     maxAccum = Math.max(maxAccum, grid.accumulation[i]);
@@ -1180,7 +869,7 @@ function drawFlowGrid() {
       const idx = cellZ * grid.width + cellX;
       const accum = grid.accumulation[idx];
 
-      if (accum <= 1) continue; // Skip cells with minimal flow
+      if (accum <= 1) continue;
 
       const worldX = grid.bounds.minX + (cellX + 0.5) * grid.resolution;
       const worldZ = grid.bounds.minZ + (cellZ + 0.5) * grid.resolution;
@@ -1202,7 +891,6 @@ function drawFlowGrid() {
 canvas.addEventListener('mousedown', onMouseDown);
 canvas.addEventListener('mousemove', onMouseMove);
 canvas.addEventListener('mouseup', onMouseUp);
-canvas.addEventListener('dblclick', onDoubleClick);
 canvas.addEventListener('contextmenu', onContextMenu);
 canvas.addEventListener('wheel', onWheel);
 
@@ -1218,83 +906,72 @@ function onMouseDown(e) {
     return;
   }
 
-  // Right click handled in contextmenu
   if (e.button === 2) return;
 
   const world = canvasToWorld(mouse.x, mouse.y);
 
-  if (state.currentTool === 'draw') {
-    if (!state.isDrawing) {
-      // Start new spine
-      state.isDrawing = true;
-      state.drawingSpine = {
-        id: `spine_${Date.now()}`,
-        vertices: [{
-          x: world.x,
-          z: world.z,
-          elevation: 0.7,
-          influence: 30
-        }]
-      };
-    } else {
-      // Add vertex to current spine
-      state.drawingSpine.vertices.push({
-        x: world.x,
-        z: world.z,
-        elevation: 0.7,
-        influence: 30
-      });
-    }
+  if (state.currentTool === 'add') {
+    // Add new blob at click position
+    const newBlob = createBlob(
+      generateBlobId(state.template.blobs.length),
+      world.x,
+      world.z,
+      state.toolDefaults.elevation,
+      state.toolDefaults.radius,
+      state.toolDefaults.profile
+    );
+    state.template.blobs.push(newBlob);
+    state.selectedBlob = newBlob;
+
+    // Update tool defaults from this blob (for clone behavior)
+    state.toolDefaults.elevation = newBlob.elevation;
+    state.toolDefaults.radius = newBlob.radius;
+    state.toolDefaults.profile = newBlob.profile;
+
     render();
   } else if (state.currentTool === 'select') {
-    // First try to select a vertex
-    const vertexHit = hitTestVertex(mouse.x, mouse.y);
-    if (vertexHit) {
-      state.selectedSpine = vertexHit.spine;
-      state.selectedVertex = vertexHit.vertexIndex;
-      state.selectedHalfCell = null;  // Clear half-cell selection
-      state.hoveredHalfCell = null;   // Clear hover when selecting vertex
+    // Check if clicking on a blob center
+    const hitBlob = hitTestBlobCenter(mouse.x, mouse.y);
+    if (hitBlob) {
+      state.selectedBlob = hitBlob;
       state.isDragging = true;
+
+      // Update tool defaults from selected blob
+      state.toolDefaults.elevation = hitBlob.elevation;
+      state.toolDefaults.radius = hitBlob.radius;
+      state.toolDefaults.profile = hitBlob.profile;
     } else {
-      // Try to select a half-cell
-      const halfCellHit = hitTestHalfCell(mouse.x, mouse.y);
-      if (halfCellHit) {
-        state.selectedHalfCell = halfCellHit;
-        state.selectedSpine = null;  // Clear vertex selection
-        state.selectedVertex = null;
+      // Check if clicking on a blob radius ring
+      const radiusHit = hitTestBlobRadius(mouse.x, mouse.y);
+      if (radiusHit) {
+        state.selectedBlob = radiusHit;
+        state.isDraggingRadius = true;
       } else {
-        // Clear all selection (clicked outside world bounds or no spines)
-        state.selectedSpine = null;
-        state.selectedVertex = null;
-        state.selectedHalfCell = null;
+        state.selectedBlob = null;
       }
     }
     render();
   } else if (state.currentTool === 'delete') {
-    // Delete entire spine if clicked on any of its vertices
-    const hit = hitTestSpine(mouse.x, mouse.y);
-    if (hit) {
-      const index = state.template.spines.indexOf(hit);
+    const hitBlob = hitTestBlobCenter(mouse.x, mouse.y) || hitTestBlobRadius(mouse.x, mouse.y);
+    if (hitBlob) {
+      const index = state.template.blobs.indexOf(hitBlob);
       if (index !== -1) {
-        state.template.spines.splice(index, 1);
-        state.selectedSpine = null;
-        state.selectedVertex = null;
-        state.hoveredSpine = null;
+        state.template.blobs.splice(index, 1);
+        if (state.selectedBlob === hitBlob) {
+          state.selectedBlob = null;
+        }
       }
     }
     render();
   } else if (state.currentTool === 'add-source') {
-    // Add manual water source at click location
     const source = createManualSource(world.x, world.z, {
       id: `source_manual_${Date.now()}`,
       flowRate: 0.5
     });
     state.hydrology.waterSources.push(source);
     state.selectedSource = source;
-    // Automatically run simulation when adding a source
     runHydrologySimulation();
   } else if (state.currentTool === 'add-lake') {
-    // Add manual lake at click location
     const lake = createManualLake(world.x, world.z, {
       id: `lake_manual_${Date.now()}`,
       waterLevel: 0.15,
@@ -1302,18 +979,14 @@ function onMouseDown(e) {
     });
     state.hydrology.lakes.push(lake);
     state.selectedLake = lake;
-    // Automatically run simulation when adding a lake
     runHydrologySimulation();
   }
 }
 
 function onMouseMove(e) {
   const mouse = getMousePos(e);
-
-  // Track mouse position for rubberband
   state.mousePos = { x: mouse.x, y: mouse.y };
 
-  // Handle panning
   if (state.isPanning) {
     const dx = mouse.x - state.panStart.x;
     const dy = mouse.y - state.panStart.y;
@@ -1324,40 +997,37 @@ function onMouseMove(e) {
     return;
   }
 
-  // Handle vertex dragging
-  if (state.currentTool === 'select' && state.isDragging && state.selectedSpine !== null) {
+  if (state.isDragging && state.selectedBlob) {
     const world = canvasToWorld(mouse.x, mouse.y);
-    const vertex = state.selectedSpine.vertices[state.selectedVertex];
-    vertex.x = world.x;
-    vertex.z = world.z;
+    state.selectedBlob.x = world.x;
+    state.selectedBlob.z = world.z;
     render();
     return;
   }
 
-  // Handle rubberband update while drawing
-  if (state.currentTool === 'draw' && state.isDrawing) {
+  if (state.isDraggingRadius && state.selectedBlob) {
+    const world = canvasToWorld(mouse.x, mouse.y);
+    const dx = world.x - state.selectedBlob.x;
+    const dz = world.z - state.selectedBlob.z;
+    state.selectedBlob.radius = Math.max(0.05, Math.sqrt(dx * dx + dz * dz));
+    state.toolDefaults.radius = state.selectedBlob.radius;
     render();
     return;
   }
 
-  // Handle delete hover highlight
-  if (state.currentTool === 'delete') {
-    const hit = hitTestSpine(mouse.x, mouse.y);
-    if (hit !== state.hoveredSpine) {
-      state.hoveredSpine = hit;
+  // Hover detection
+  if (state.currentTool === 'select' || state.currentTool === 'delete') {
+    const hitBlob = hitTestBlobCenter(mouse.x, mouse.y) || hitTestBlobRadius(mouse.x, mouse.y);
+    if (hitBlob !== state.hoveredBlob) {
+      state.hoveredBlob = hitBlob;
+      canvas.style.cursor = hitBlob ? 'pointer' : 'default';
       render();
     }
-    return;
   }
 
-  // Handle half-cell hover highlight in select mode
-  if (state.currentTool === 'select') {
-    const hovered = hitTestHalfCell(mouse.x, mouse.y);
-    if (!halfCellsEqual(hovered, state.hoveredHalfCell)) {
-      state.hoveredHalfCell = hovered;
-      canvas.style.cursor = hovered ? 'pointer' : 'default';
-      render();
-    }
+  // Cursor preview for add tool
+  if (state.currentTool === 'add') {
+    render();
   }
 }
 
@@ -1366,68 +1036,57 @@ function onMouseUp(e) {
     state.isPanning = false;
     updateCursor();
   }
-  if (state.isDragging) {
-    state.isDragging = false;
-  }
+  state.isDragging = false;
+  state.isDraggingRadius = false;
 }
 
 function onContextMenu(e) {
   e.preventDefault();
-  // Right-click finishes spine drawing
-  if (state.isDrawing) {
-    finishDrawing();
-  }
 }
 
 function onKeyDown(e) {
   if (e.key === 'Escape') {
-    // Esc cancels spine drawing
-    if (state.isDrawing) {
-      state.isDrawing = false;
-      state.drawingSpine = null;
-    }
-    // Clear all selection and hover
-    state.selectedHalfCell = null;
-    state.hoveredHalfCell = null;
-    state.selectedSpine = null;
-    state.selectedVertex = null;
+    state.selectedBlob = null;
+    state.hoveredBlob = null;
     render();
   }
-}
 
-/**
- * Finish drawing current spine (if valid)
- */
-function finishDrawing() {
-  if (state.drawingSpine && state.drawingSpine.vertices.length >= 1) {
-    state.template.spines.push(state.drawingSpine);
+  // Delete selected blob with Delete or Backspace
+  if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedBlob) {
+    const index = state.template.blobs.indexOf(state.selectedBlob);
+    if (index !== -1) {
+      state.template.blobs.splice(index, 1);
+      state.selectedBlob = null;
+      render();
+    }
   }
-  state.isDrawing = false;
-  state.drawingSpine = null;
-  render();
 }
 
-// Listen for keyboard events
 document.addEventListener('keydown', onKeyDown);
 
 function onWheel(e) {
   e.preventDefault();
   const mouse = getMousePos(e);
 
-  // Shift+wheel: adjust elevation of hovered vertex
+  // Shift+wheel: adjust elevation of selected or hovered blob
   if (e.shiftKey) {
-    const hit = hitTestVertex(mouse.x, mouse.y);
-    if (hit) {
-      const vertex = hit.spine.vertices[hit.vertexIndex];
+    const blob = state.selectedBlob || state.hoveredBlob;
+    if (blob) {
       const delta = e.deltaY > 0 ? -0.05 : 0.05;
-      vertex.elevation = Math.max(0, Math.min(1, vertex.elevation + delta));
+      blob.elevation = Math.max(0, Math.min(1, blob.elevation + delta));
+      state.toolDefaults.elevation = blob.elevation;
+      render();
+      return;
+    }
+  }
 
-      // Update UI if this vertex is selected
-      if (state.selectedSpine === hit.spine && state.selectedVertex === hit.vertexIndex) {
-        document.getElementById('prop-elevation').value = vertex.elevation;
-        document.getElementById('prop-elevation-value').textContent = vertex.elevation.toFixed(2);
-      }
-
+  // Ctrl+wheel: adjust radius of selected or hovered blob
+  if (e.ctrlKey) {
+    const blob = state.selectedBlob || state.hoveredBlob;
+    if (blob) {
+      const delta = e.deltaY > 0 ? -0.02 : 0.02;
+      blob.radius = Math.max(0.05, Math.min(1, blob.radius + delta));
+      state.toolDefaults.radius = blob.radius;
       render();
       return;
     }
@@ -1435,14 +1094,11 @@ function onWheel(e) {
 
   // Normal wheel: zoom
   const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-
-  // Zoom toward mouse position
   const worldBefore = canvasToWorld(mouse.x, mouse.y);
   state.view.zoom *= zoomFactor;
   state.view.zoom = Math.max(50, Math.min(2000, state.view.zoom));
   const worldAfter = canvasToWorld(mouse.x, mouse.y);
 
-  // Adjust offset to keep mouse position stable
   state.view.offsetX += (worldAfter.x - worldBefore.x) * state.view.zoom;
   state.view.offsetY += (worldAfter.z - worldBefore.z) * state.view.zoom;
 
@@ -1450,7 +1106,7 @@ function onWheel(e) {
 }
 
 function updateCursor() {
-  if (state.currentTool === 'draw') {
+  if (state.currentTool === 'add') {
     canvas.style.cursor = 'crosshair';
   } else if (state.currentTool === 'delete') {
     canvas.style.cursor = 'not-allowed';
@@ -1459,119 +1115,31 @@ function updateCursor() {
   }
 }
 
-function onDoubleClick(e) {
-  if (state.currentTool === 'draw' && state.isDrawing) {
-    finishDrawing();
-    // Note: finishDrawing already calls render() and resets state
-    return;
-  }
-  // Legacy handling in case we reach here
-  if (state.isDrawing) {
-    state.drawingSpine = null;
-    render();
-  }
-}
-
-function hitTestVertex(cx, cy, threshold = 12) {
-  for (const spine of state.template.spines) {
-    for (let i = 0; i < spine.vertices.length; i++) {
-      const v = spine.vertices[i];
-      const p = worldToCanvas(v.x, v.z);
-      const dx = cx - p.x;
-      const dy = cy - p.y;
-      if (Math.sqrt(dx * dx + dy * dy) < threshold) {
-        return { spine, vertexIndex: i };
-      }
+function hitTestBlobCenter(cx, cy, threshold = 12) {
+  for (const blob of state.template.blobs) {
+    const p = worldToCanvas(blob.x, blob.z);
+    const dx = cx - p.x;
+    const dy = cy - p.y;
+    if (Math.sqrt(dx * dx + dy * dy) < threshold) {
+      return blob;
     }
   }
   return null;
 }
 
-/**
- * Hit test against spine lines (for delete tool)
- */
-function hitTestSpine(cx, cy, threshold = 8) {
-  for (const spine of state.template.spines) {
-    // Check vertices first
-    for (const v of spine.vertices) {
-      const p = worldToCanvas(v.x, v.z);
-      const dx = cx - p.x;
-      const dy = cy - p.y;
-      if (Math.sqrt(dx * dx + dy * dy) < threshold * 1.5) {
-        return spine;
-      }
-    }
-    // Check line segments
-    for (let i = 0; i < spine.vertices.length - 1; i++) {
-      const p1 = worldToCanvas(spine.vertices[i].x, spine.vertices[i].z);
-      const p2 = worldToCanvas(spine.vertices[i + 1].x, spine.vertices[i + 1].z);
-      const dist = distanceToLineSegment(cx, cy, p1.x, p1.y, p2.x, p2.y);
-      if (dist < threshold) {
-        return spine;
-      }
+function hitTestBlobRadius(cx, cy, threshold = 8) {
+  for (const blob of state.template.blobs) {
+    const p = worldToCanvas(blob.x, blob.z);
+    const radiusPixels = blob.radius * state.view.zoom;
+    const dx = cx - p.x;
+    const dy = cy - p.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    // Check if near the radius circle edge
+    if (Math.abs(dist - radiusPixels) < threshold) {
+      return blob;
     }
   }
   return null;
-}
-
-/**
- * Distance from point to line segment (canvas coordinates)
- */
-function distanceToLineSegment(px, py, x1, y1, x2, y2) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const lengthSq = dx * dx + dy * dy;
-  if (lengthSq === 0) return Math.sqrt((px - x1) ** 2 + (py - y1) ** 2);
-
-  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lengthSq));
-  const closestX = x1 + t * dx;
-  const closestY = y1 + t * dy;
-  return Math.sqrt((px - closestX) ** 2 + (py - closestY) ** 2);
-}
-
-/**
- * Distance from point to line segment (world coordinates)
- * @param {number} px - Point X
- * @param {number} pz - Point Z
- * @param {Object} v1 - Segment start {x, z}
- * @param {Object} v2 - Segment end {x, z}
- * @returns {number} Distance
- */
-function distanceToSegmentWorld(px, pz, v1, v2) {
-  const dx = v2.x - v1.x;
-  const dz = v2.z - v1.z;
-  const lengthSq = dx * dx + dz * dz;
-  if (lengthSq === 0) return Math.sqrt((px - v1.x) ** 2 + (pz - v1.z) ** 2);
-
-  const t = Math.max(0, Math.min(1, ((px - v1.x) * dx + (pz - v1.z) * dz) / lengthSq));
-  const closestX = v1.x + t * dx;
-  const closestZ = v1.z + t * dz;
-  return Math.sqrt((px - closestX) ** 2 + (pz - closestZ) ** 2);
-}
-
-/**
- * Hit test to find which half-cell a canvas point is in
- * @param {number} cx - Canvas X coordinate
- * @param {number} cy - Canvas Y coordinate
- * @returns {{spineId: string, vertexIndex: number, side: string} | null}
- */
-function hitTestHalfCell(cx, cy) {
-  const { x, z } = canvasToWorld(cx, cy);
-
-  if (state.template.spines.length === 0) return null;
-
-  // Get visible bounds with margin for Voronoi computation
-  const topLeft = canvasToWorld(0, 0);
-  const bottomRight = canvasToWorld(canvas.width, canvas.height);
-  const bounds = {
-    minX: Math.min(-10, topLeft.x - 1),
-    maxX: Math.max(10, bottomRight.x + 1),
-    minZ: Math.min(-10, topLeft.z - 1),
-    maxZ: Math.max(10, bottomRight.z + 1)
-  };
-
-  // Use shared findHalfCellAt with polygon-based lookup
-  return findHalfCellAt(x, z, state.template.spines, null, bounds);
 }
 
 // =============================================================================
@@ -1584,54 +1152,37 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelector('.tab.active').classList.remove('active');
     tab.classList.add('active');
     state.currentTab = tab.dataset.tab;
-    // Invalidate cache when switching tabs (noise changes between phases)
     state.cache.cacheKey = null;
     updateTabUI();
     render();
   });
 });
 
-/**
- * Update UI elements based on current tab
- */
 function updateTabUI() {
   const noiseSettings = document.getElementById('noise-settings');
-  const halfCellNoiseProps = document.getElementById('halfcell-noise-props');
   const hydrologySettings = document.getElementById('hydrology-settings');
   const hydrologyTools = document.querySelectorAll('.hydrology-tool');
 
   if (state.currentTab === 'noise') {
-    // Show noise panel
     noiseSettings.style.display = 'block';
-    // Enable warp for Tab 2
     state.template.defaults.warp.enabled = true;
     document.getElementById('warp-enabled').checked = true;
   } else {
-    // Hide noise panel
     noiseSettings.style.display = 'none';
-    // Disable warp for Phase 1 (idealized terrain)
-    if (state.currentTab === 'spines') {
+    if (state.currentTab === 'terrain') {
       state.template.defaults.warp.enabled = false;
       document.getElementById('warp-enabled').checked = false;
     }
   }
 
-  // Show/hide per-cell noise controls based on tab
-  if (halfCellNoiseProps) {
-    halfCellNoiseProps.style.display = (state.currentTab === 'noise') ? 'block' : 'none';
-  }
-
-  // Show/hide hydrology panel and tools
   if (hydrologySettings) {
     hydrologySettings.style.display = (state.currentTab === 'hydrology') ? 'block' : 'none';
   }
 
-  // Show/hide hydrology tools
   hydrologyTools.forEach(tool => {
     tool.style.display = (state.currentTab === 'hydrology') ? 'inline-flex' : 'none';
   });
 
-  // Clear hydrology selection when leaving Tab 3
   if (state.currentTab !== 'hydrology') {
     state.selectedSource = null;
     state.selectedLake = null;
@@ -1640,21 +1191,12 @@ function updateTabUI() {
 
 document.querySelectorAll('.tool').forEach(tool => {
   tool.addEventListener('click', () => {
-    // Auto-finish drawing when switching tools
-    if (state.isDrawing) {
-      finishDrawing();
-    }
-
     document.querySelector('.tool.active').classList.remove('active');
     tool.classList.add('active');
     state.currentTool = tool.id.replace('tool-', '');
-    // Clear hover state when changing tools
-    state.hoveredHalfCell = null;
-    // Clear selection when switching to draw tool
-    if (state.currentTool === 'draw') {
-      state.selectedSpine = null;
-      state.selectedVertex = null;
-      state.selectedHalfCell = null;
+    state.hoveredBlob = null;
+
+    if (state.currentTool === 'add') {
       canvas.style.cursor = 'crosshair';
     } else if (state.currentTool === 'delete') {
       canvas.style.cursor = 'not-allowed';
@@ -1677,17 +1219,11 @@ document.getElementById('randomize').addEventListener('click', () => {
 });
 
 document.getElementById('clear-canvas').addEventListener('click', () => {
-  if (state.template.spines.length === 0) return;
-  if (confirm('Clear all spines? This cannot be undone.')) {
-    state.template.spines = [];
-    state.template.halfCells = {};
-    state.selectedSpine = null;
-    state.selectedVertex = null;
-    state.selectedHalfCell = null;
-    state.hoveredHalfCell = null;
-    state.hoveredSpine = null;
-    state.isDrawing = false;
-    state.drawingSpine = null;
+  if (state.template.blobs.length === 0) return;
+  if (confirm('Clear all blobs? This cannot be undone.')) {
+    state.template.blobs = [];
+    state.selectedBlob = null;
+    state.hoveredBlob = null;
     render();
   }
 });
@@ -1702,14 +1238,18 @@ document.getElementById('show-contours').addEventListener('change', (e) => {
   render();
 });
 
+// Voronoi cells toggle
+document.getElementById('show-cells')?.addEventListener('change', (e) => {
+  state.showVoronoiCells = e.target.checked;
+  render();
+});
+
 // =============================================================================
 // Noise Panel Controls (Tab 2)
 // =============================================================================
 
-// Domain warp controls
 document.getElementById('warp-enabled').addEventListener('change', (e) => {
   state.template.defaults.warp.enabled = e.target.checked;
-  // Invalidate caches when warp changes
   noiseCache.cacheKey = null;
   render();
 });
@@ -1730,7 +1270,6 @@ document.getElementById('warp-scale').addEventListener('input', (e) => {
   render();
 });
 
-// Default noise controls
 document.getElementById('default-roughness').addEventListener('input', (e) => {
   const value = parseFloat(e.target.value);
   state.template.defaults.noise.roughness = value;
@@ -1747,7 +1286,6 @@ document.getElementById('default-feature-scale').addEventListener('input', (e) =
   render();
 });
 
-// Micro detail controls
 document.getElementById('micro-detail-enabled').addEventListener('change', (e) => {
   state.template.defaults.microDetail.enabled = e.target.checked;
   render();
@@ -1760,64 +1298,9 @@ document.getElementById('micro-detail-amplitude').addEventListener('input', (e) 
   render();
 });
 
-// Per-cell noise controls
-document.getElementById('prop-cell-roughness').addEventListener('input', (e) => {
-  if (!state.selectedHalfCell) return;
-  const { spineId, vertexIndex, side } = state.selectedHalfCell;
-  const id = getHalfCellId(spineId, vertexIndex, side);
-  if (!state.template.halfCells[id]) {
-    state.template.halfCells[id] = {};
-  }
-  if (!state.template.halfCells[id].noise) {
-    state.template.halfCells[id].noise = {};
-  }
-  const value = parseFloat(e.target.value);
-  state.template.halfCells[id].noise.roughness = value;
-  document.getElementById('prop-cell-roughness-value').textContent = value.toFixed(2);
-  render();
-});
-
-document.getElementById('prop-cell-feature-scale').addEventListener('input', (e) => {
-  if (!state.selectedHalfCell) return;
-  const { spineId, vertexIndex, side } = state.selectedHalfCell;
-  const id = getHalfCellId(spineId, vertexIndex, side);
-  if (!state.template.halfCells[id]) {
-    state.template.halfCells[id] = {};
-  }
-  if (!state.template.halfCells[id].noise) {
-    state.template.halfCells[id].noise = {};
-  }
-  const value = parseFloat(e.target.value);
-  state.template.halfCells[id].noise.featureScale = value;
-  document.getElementById('prop-cell-feature-scale-value').textContent = value.toFixed(2);
-  render();
-});
-
-document.getElementById('reset-cell-noise').addEventListener('click', () => {
-  if (!state.selectedHalfCell) return;
-  const { spineId, vertexIndex, side } = state.selectedHalfCell;
-  const id = getHalfCellId(spineId, vertexIndex, side);
-  if (state.template.halfCells[id]?.noise) {
-    delete state.template.halfCells[id].noise;
-    // Update UI to show defaults
-    const defaults = state.template.defaults.noise;
-    document.getElementById('prop-cell-roughness').value = defaults.roughness;
-    document.getElementById('prop-cell-roughness-value').textContent = defaults.roughness.toFixed(2);
-    document.getElementById('prop-cell-feature-scale').value = defaults.featureScale;
-    document.getElementById('prop-cell-feature-scale-value').textContent = defaults.featureScale.toFixed(2);
-    render();
-  }
-});
-
 // =============================================================================
 // Hydrology Panel Controls (Tab 3)
 // =============================================================================
-
-document.getElementById('multiridge-enabled')?.addEventListener('change', (e) => {
-  state.hydrology.config.multiridge = e.target.checked;
-  state.hydrology.cacheKey = null; // Force regeneration
-  render();
-});
 
 document.getElementById('auto-detect-sources')?.addEventListener('change', (e) => {
   state.hydrology.config.autoDetect = e.target.checked;
@@ -1871,11 +1354,9 @@ document.getElementById('show-water-sources')?.addEventListener('change', (e) =>
 });
 
 document.getElementById('simulate-water')?.addEventListener('click', () => {
-  // Force regeneration of hydrology
   runHydrologySimulation();
 });
 
-// Hydrology tool handlers
 document.getElementById('tool-add-source')?.addEventListener('click', () => {
   document.querySelector('.tool.active')?.classList.remove('active');
   document.getElementById('tool-add-source').classList.add('active');
@@ -1892,111 +1373,95 @@ document.getElementById('tool-add-lake')?.addEventListener('click', () => {
   render();
 });
 
-// Property panel controls
-const propElevation = document.getElementById('prop-elevation');
-const propInfluence = document.getElementById('prop-influence');
-const propElevationValue = document.getElementById('prop-elevation-value');
-const propInfluenceValue = document.getElementById('prop-influence-value');
+// =============================================================================
+// Blob Properties Panel
+// =============================================================================
 
-propElevation.addEventListener('input', (e) => {
-  if (state.selectedSpine && state.selectedVertex !== null) {
+const propElevation = document.getElementById('prop-elevation');
+const propRadius = document.getElementById('prop-radius');
+const propProfile = document.getElementById('prop-profile');
+const propElevationValue = document.getElementById('prop-elevation-value');
+const propRadiusValue = document.getElementById('prop-radius-value');
+
+propElevation?.addEventListener('input', (e) => {
+  if (state.selectedBlob) {
     const value = parseFloat(e.target.value);
-    state.selectedSpine.vertices[state.selectedVertex].elevation = value;
+    state.selectedBlob.elevation = value;
+    state.toolDefaults.elevation = value;
     propElevationValue.textContent = value.toFixed(2);
     render();
   }
 });
 
-propInfluence.addEventListener('input', (e) => {
-  if (state.selectedSpine && state.selectedVertex !== null) {
-    const value = parseInt(e.target.value);
-    state.selectedSpine.vertices[state.selectedVertex].influence = value;
-    propInfluenceValue.textContent = value;
+propRadius?.addEventListener('input', (e) => {
+  if (state.selectedBlob) {
+    const value = parseFloat(e.target.value);
+    state.selectedBlob.radius = value;
+    state.toolDefaults.radius = value;
+    propRadiusValue.textContent = value.toFixed(2);
     render();
   }
 });
 
-// Half-cell property panel controls
-const propProfile = document.getElementById('prop-profile');
-const propFalloff = document.getElementById('prop-falloff');
-const propFalloffValue = document.getElementById('prop-falloff-value');
-
-propProfile.addEventListener('change', (e) => {
-  if (!state.selectedHalfCell) return;
-  const { spineId, vertexIndex, side } = state.selectedHalfCell;
-  const id = getHalfCellId(spineId, vertexIndex, side);
-  if (!state.template.halfCells[id]) {
-    state.template.halfCells[id] = {};
+propProfile?.addEventListener('change', (e) => {
+  if (state.selectedBlob) {
+    state.selectedBlob.profile = e.target.value;
+    state.toolDefaults.profile = e.target.value;
+    render();
   }
-  state.template.halfCells[id].profile = e.target.value;
-  render();
 });
 
-propFalloff.addEventListener('input', (e) => {
-  if (!state.selectedHalfCell) return;
-  const { spineId, vertexIndex, side } = state.selectedHalfCell;
-  const id = getHalfCellId(spineId, vertexIndex, side);
-  if (!state.template.halfCells[id]) {
-    state.template.halfCells[id] = {};
-  }
-  const value = parseFloat(e.target.value);
-  state.template.halfCells[id].falloffCurve = value;
-  propFalloffValue.textContent = value.toFixed(2);
-  render();
+// Tool defaults panel
+document.getElementById('tool-elevation')?.addEventListener('input', (e) => {
+  state.toolDefaults.elevation = parseFloat(e.target.value);
+  document.getElementById('tool-elevation-value').textContent = state.toolDefaults.elevation.toFixed(2);
 });
 
-/**
- * Update properties panel based on selection
- */
+document.getElementById('tool-radius')?.addEventListener('input', (e) => {
+  state.toolDefaults.radius = parseFloat(e.target.value);
+  document.getElementById('tool-radius-value').textContent = state.toolDefaults.radius.toFixed(2);
+});
+
+document.getElementById('tool-profile')?.addEventListener('change', (e) => {
+  state.toolDefaults.profile = e.target.value;
+});
+
 function updatePropertiesPanel() {
   const noSelection = document.getElementById('no-selection');
-  const vertexProps = document.getElementById('vertex-props');
-  const halfCellProps = document.getElementById('halfcell-props');
-  const halfCellNoiseProps = document.getElementById('halfcell-noise-props');
+  const blobProps = document.getElementById('blob-props');
+  const toolProps = document.getElementById('tool-props');
 
-  if (state.selectedSpine && state.selectedVertex !== null) {
-    // Show vertex properties
-    const vertex = state.selectedSpine.vertices[state.selectedVertex];
+  if (state.selectedBlob) {
     noSelection.style.display = 'none';
-    vertexProps.style.display = 'block';
-    halfCellProps.style.display = 'none';
-    propElevation.value = vertex.elevation;
-    propElevationValue.textContent = vertex.elevation.toFixed(2);
-    propInfluence.value = vertex.influence;
-    propInfluenceValue.textContent = vertex.influence;
-  } else if (state.selectedHalfCell) {
-    // Show half-cell properties
-    noSelection.style.display = 'none';
-    vertexProps.style.display = 'none';
-    halfCellProps.style.display = 'block';
+    blobProps.style.display = 'block';
+    if (toolProps) toolProps.style.display = 'none';
 
-    const { spineId, vertexIndex, side } = state.selectedHalfCell;
-    const world = buildWorld();
-    const config = getHalfCellConfig(world, spineId, vertexIndex, side);
-
-    document.getElementById('prop-profile').value = config.profile;
-    document.getElementById('prop-falloff').value = config.falloffCurve;
-    document.getElementById('prop-falloff-value').textContent = config.falloffCurve.toFixed(2);
-
-    // Update per-cell noise properties if in Tab 2
-    if (halfCellNoiseProps && state.currentTab === 'noise') {
-      halfCellNoiseProps.style.display = 'block';
-      const id = getHalfCellId(spineId, vertexIndex, side);
-      const cellConfig = state.template.halfCells[id];
-      const noiseConfig = cellConfig?.noise ?? state.template.defaults.noise;
-
-      document.getElementById('prop-cell-roughness').value = noiseConfig.roughness;
-      document.getElementById('prop-cell-roughness-value').textContent = noiseConfig.roughness.toFixed(2);
-      document.getElementById('prop-cell-feature-scale').value = noiseConfig.featureScale;
-      document.getElementById('prop-cell-feature-scale-value').textContent = noiseConfig.featureScale.toFixed(2);
-    } else if (halfCellNoiseProps) {
-      halfCellNoiseProps.style.display = 'none';
-    }
+    propElevation.value = state.selectedBlob.elevation;
+    propElevationValue.textContent = state.selectedBlob.elevation.toFixed(2);
+    propRadius.value = state.selectedBlob.radius;
+    propRadiusValue.textContent = state.selectedBlob.radius.toFixed(2);
+    propProfile.value = state.selectedBlob.profile;
   } else {
-    // No selection
     noSelection.style.display = 'block';
-    vertexProps.style.display = 'none';
-    halfCellProps.style.display = 'none';
+    blobProps.style.display = 'none';
+    if (toolProps) toolProps.style.display = 'block';
+  }
+
+  // Update tool defaults UI
+  const toolElevation = document.getElementById('tool-elevation');
+  const toolRadius = document.getElementById('tool-radius');
+  const toolProfile = document.getElementById('tool-profile');
+
+  if (toolElevation) {
+    toolElevation.value = state.toolDefaults.elevation;
+    document.getElementById('tool-elevation-value').textContent = state.toolDefaults.elevation.toFixed(2);
+  }
+  if (toolRadius) {
+    toolRadius.value = state.toolDefaults.radius;
+    document.getElementById('tool-radius-value').textContent = state.toolDefaults.radius.toFixed(2);
+  }
+  if (toolProfile) {
+    toolProfile.value = state.toolDefaults.profile;
   }
 }
 
@@ -2004,9 +1469,6 @@ function updatePropertiesPanel() {
 // Initialize
 // =============================================================================
 
-/**
- * Sync noise panel UI with current state values
- */
 function syncNoisePanelUI() {
   const warp = state.template.defaults.warp;
   const noise = state.template.defaults.noise;
@@ -2031,4 +1493,4 @@ function syncNoisePanelUI() {
 resizeCanvas();
 syncNoisePanelUI();
 updateTabUI();
-console.log('kosmos-gen editor initialized');
+console.log('kosmos-gen editor initialized (blob mode)');

@@ -1,6 +1,6 @@
 /**
  * kosmos-gen - Procedural world generation
- * 
+ *
  * Public API
  */
 
@@ -13,11 +13,13 @@ export { createDomainWarp, createCachedDomainWarp, DEFAULT_WARP_CONFIG } from '.
 export {
   computeVoronoi,
   computeVoronoiCells,
-  computeHalfCellPolygons,
-  findHalfCellAt,
-  extractHalfCellBoundary,
-  clearHalfCellCache,
-  buildSeeds
+  computeBlobCells,
+  buildSeeds,
+  findNearestBlob,
+  findBlobAt,
+  getBlobCell,
+  clearCellCache,
+  clearHalfCellCache  // Legacy alias
 } from './geometry/voronoi.js';
 export { extractContours, simplifyPolyline, isClosedLoop } from './geometry/contour.js';
 export {
@@ -28,24 +30,40 @@ export {
   polygonCentroid
 } from './geometry/polygon.js';
 
-// Terrain
-export { createSpine, getHalfCells, getHalfCellConfig } from './terrain/spine.js';
-export { sampleElevation, computeProfileElevation, getProfileShape } from './terrain/elevation.js';
+// Terrain - Blob system
+export {
+  createBlob,
+  evaluateBlobAt,
+  softmaxCombine,
+  generateBlobId,
+  PROFILES,
+  PROFILE_NAMES
+} from './terrain/blob.js';
+
+// Terrain - Elevation
+export {
+  sampleElevation,
+  computeProfileElevation,
+  getProfileShape,
+  SEA_LEVEL
+} from './terrain/elevation.js';
+
+// Terrain - Noise
 export {
   sampleSurfaceNoise,
-  getHalfCellNoiseConfig,
   DEFAULT_SURFACE_NOISE_CONFIG
 } from './terrain/surfacenoise.js';
 export {
   sampleRidgeNoise,
   createRidgedNoise,
-  getHalfCellRidgeConfig,
   DEFAULT_RIDGE_NOISE_CONFIG
 } from './terrain/ridgenoise.js';
 export {
   sampleMicroDetail,
   DEFAULT_MICRO_DETAIL_CONFIG
 } from './terrain/microdetail.js';
+
+// Terrain - Coastline
 export {
   extractCoastline,
   extractBothCoastlines,
@@ -54,7 +72,6 @@ export {
   displaceAllCoastlines,
   filterSmallIslands,
   getCoastlineStats,
-  SEA_LEVEL,
   DEFAULT_COASTLINE_CONFIG
 } from './terrain/coastline.js';
 

@@ -10,7 +10,6 @@ import {
   isValidCell,
   cellIndex
 } from './flowgrid.js';
-import { getHalfCellConfig, getHalfCells } from './spine.js';
 
 // Default flow rate for manual sources
 const DEFAULT_FLOW_RATE = 0.5;
@@ -27,15 +26,11 @@ export function detectWaterSources(world, flowGrid, options = {}) {
   const rng = seededRandom(seed);
   const sources = [];
 
-  // Strategy 1: High-elevation points near spine vertices
-  const spineVertexSources = detectSpineVertexSources(world, flowGrid, rng);
-  sources.push(...spineVertexSources);
+  // Strategy 1: High-elevation points near blob centers
+  const blobSources = detectBlobSources(world, flowGrid, rng);
+  sources.push(...blobSources);
 
-  // Strategy 2: Bowl-profile half-cell centers
-  const bowlSources = detectBowlProfileSources(world, flowGrid, rng);
-  sources.push(...bowlSources);
-
-  // Strategy 3: Flow convergence points (high accumulation at high elevation)
+  // Strategy 2: Flow convergence points (high accumulation at high elevation)
   const convergenceSources = detectConvergenceSources(flowGrid, rng);
   sources.push(...convergenceSources);
 
@@ -48,99 +43,44 @@ export function detectWaterSources(world, flowGrid, options = {}) {
 }
 
 /**
- * Detect sources near spine vertices (mountain peaks)
+ * Detect sources near high-elevation blob centers
  * @param {Object} world - World object
  * @param {Object} flowGrid - Flow grid
  * @param {Function} rng - Random number generator
  * @returns {Array} Water sources
  */
-function detectSpineVertexSources(world, flowGrid, rng) {
+function detectBlobSources(world, flowGrid, rng) {
   const sources = [];
-  const spines = world.template?.spines || [];
-  const proximityThreshold = 0.1; // Distance from vertex to check
+  const blobs = world.template?.blobs || [];
 
-  for (const spine of spines) {
-    for (const vertex of spine.vertices) {
-      // Skip low-elevation vertices
-      if (vertex.elevation < 0.4) continue;
+  for (const blob of blobs) {
+    // Skip low-elevation blobs
+    if (blob.elevation < 0.4) continue;
 
-      // Find the grid cell at this vertex
-      const cellX = Math.floor((vertex.x - flowGrid.bounds.minX) / flowGrid.resolution);
-      const cellZ = Math.floor((vertex.z - flowGrid.bounds.minZ) / flowGrid.resolution);
+    // Find the grid cell at blob center
+    const cellX = Math.floor((blob.x - flowGrid.bounds.minX) / flowGrid.resolution);
+    const cellZ = Math.floor((blob.z - flowGrid.bounds.minZ) / flowGrid.resolution);
 
-      if (!isValidCell(flowGrid, cellX, cellZ)) continue;
+    if (!isValidCell(flowGrid, cellX, cellZ)) continue;
 
-      // Check if this is a local maximum (higher than surrounding area)
-      const idx = cellIndex(flowGrid, cellX, cellZ);
-      const elevation = flowGrid.elevation[idx];
+    const idx = cellIndex(flowGrid, cellX, cellZ);
+    const elevation = flowGrid.elevation[idx];
 
-      // Only create source if elevation is high enough
-      if (elevation < 0.35) continue;
+    // Only create source if sampled elevation is high enough
+    if (elevation < 0.35) continue;
 
-      // Compute flow rate based on elevation
-      const flowRate = computeFlowRate(elevation, 1, flowGrid);
+    // Compute flow rate based on elevation
+    const flowRate = computeFlowRate(elevation, 1, flowGrid);
 
-      sources.push({
-        id: '', // Will be assigned later
-        x: vertex.x,
-        z: vertex.z,
-        flowRate,
-        origin: 'auto',
-        enabled: true,
-        sourceType: 'spine_vertex'
-      });
-    }
-  }
-
-  return sources;
-}
-
-/**
- * Detect sources at bowl-profile half-cell centers
- * Bowl cells collect water and often have springs
- * @param {Object} world - World object
- * @param {Object} flowGrid - Flow grid
- * @param {Function} rng - Random number generator
- * @returns {Array} Water sources
- */
-function detectBowlProfileSources(world, flowGrid, rng) {
-  const sources = [];
-  const spines = world.template?.spines || [];
-
-  for (const spine of spines) {
-    const halfCells = getHalfCells(spine);
-
-    for (const hc of halfCells) {
-      const config = getHalfCellConfig(world, hc.id);
-      if (config?.profile !== 'bowl') continue;
-
-      // Get cell center
-      const { x, z } = hc.center || { x: 0, z: 0 };
-
-      // Check elevation at this point
-      const cellX = Math.floor((x - flowGrid.bounds.minX) / flowGrid.resolution);
-      const cellZ = Math.floor((z - flowGrid.bounds.minZ) / flowGrid.resolution);
-
-      if (!isValidCell(flowGrid, cellX, cellZ)) continue;
-
-      const idx = cellIndex(flowGrid, cellX, cellZ);
-      const elevation = flowGrid.elevation[idx];
-
-      // Bowl cells at higher elevations make better sources
-      if (elevation < 0.25) continue;
-
-      const flowRate = computeFlowRate(elevation, 0.8, flowGrid);
-
-      sources.push({
-        id: '',
-        x,
-        z,
-        flowRate,
-        origin: 'auto',
-        enabled: true,
-        sourceType: 'bowl_cell'
-      });
-    }
+    sources.push({
+      id: '', // Will be assigned later
+      x: blob.x,
+      z: blob.z,
+      flowRate,
+      origin: 'auto',
+      enabled: true,
+      sourceType: 'blob_center'
+    });
   }
 
   return sources;

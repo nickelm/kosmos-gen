@@ -9,64 +9,70 @@
 <body>
   <div id="app">
     <nav id="tabs">
-      <button class="tab active" data-tab="spines">1. Spines</button>
+      <button class="tab active" data-tab="terrain">1. Terrain</button>
       <button class="tab" data-tab="noise">2. Noise</button>
       <button class="tab" data-tab="hydrology">3. Hydrology</button>
       <button class="tab" data-tab="climate" disabled>4. Climate</button>
       <button class="tab" data-tab="zones" disabled>5. Zones</button>
       <button class="tab" data-tab="content" disabled>6. Content</button>
     </nav>
-    
+
     <main id="workspace">
       <canvas id="canvas"></canvas>
       <aside id="panel">
         <div id="properties">
           <h3>Properties</h3>
           <div id="no-selection">
-            <p>Select a vertex or half-cell to edit its properties</p>
+            <p>Click to place blobs or select existing ones</p>
+
+            <!-- Tool defaults shown when nothing selected -->
+            <div id="tool-props">
+              <h4>New Blob Settings</h4>
+              <label>
+                Elevation:
+                <input type="range" id="tool-elevation" min="0" max="1" step="0.05" value="0.5">
+                <span id="tool-elevation-value">0.50</span>
+              </label>
+              <label>
+                Radius:
+                <input type="range" id="tool-radius" min="0.05" max="1" step="0.05" value="0.25">
+                <span id="tool-radius-value">0.25</span>
+              </label>
+              <label>
+                Profile:
+                <select id="tool-profile">
+                  <option value="cone">Cone (linear)</option>
+                  <option value="plateau">Plateau (flat top)</option>
+                  <option value="bowl">Bowl (concave)</option>
+                  <option value="shield">Shield (convex)</option>
+                </select>
+              </label>
+            </div>
           </div>
-          <div id="vertex-props" style="display: none;">
+
+          <!-- Blob properties (shown when blob selected) -->
+          <div id="blob-props" style="display: none;">
+            <h4>Selected Blob</h4>
             <label>
               Elevation:
-              <input type="range" id="prop-elevation" min="0" max="1" step="0.05" value="0.7">
-              <span id="prop-elevation-value">0.7</span>
+              <input type="range" id="prop-elevation" min="0" max="1" step="0.05" value="0.5">
+              <span id="prop-elevation-value">0.50</span>
             </label>
             <label>
-              Influence:
-              <input type="range" id="prop-influence" min="5" max="200" step="5" value="30">
-              <span id="prop-influence-value">30</span>
+              Radius:
+              <input type="range" id="prop-radius" min="0.05" max="1" step="0.05" value="0.25">
+              <span id="prop-radius-value">0.25</span>
             </label>
-          </div>
-          <div id="halfcell-props" style="display: none;">
             <label>
               Profile:
               <select id="prop-profile">
-                <option value="ramp">Ramp</option>
-                <option value="plateau">Plateau</option>
-                <option value="bowl">Bowl</option>
-                <option value="shield">Shield</option>
+                <option value="cone">Cone (linear)</option>
+                <option value="plateau">Plateau (flat top)</option>
+                <option value="bowl">Bowl (concave)</option>
+                <option value="shield">Shield (convex)</option>
               </select>
             </label>
-            <label>
-              Falloff Curve:
-              <input type="range" id="prop-falloff" min="0" max="1" step="0.1" value="0.5">
-              <span id="prop-falloff-value">0.50</span>
-            </label>
-            <!-- Per-cell noise overrides (shown in Tab 2) -->
-            <div id="halfcell-noise-props" style="display: none;">
-              <hr class="prop-divider">
-              <label>
-                Roughness:
-                <input type="range" id="prop-cell-roughness" min="0" max="1" step="0.05" value="0.3">
-                <span id="prop-cell-roughness-value">0.30</span>
-              </label>
-              <label>
-                Feature Scale:
-                <input type="range" id="prop-cell-feature-scale" min="0.05" max="0.5" step="0.05" value="0.2">
-                <span id="prop-cell-feature-scale-value">0.20</span>
-              </label>
-              <button id="reset-cell-noise" class="prop-button">Reset to Default</button>
-            </div>
+            <p class="hint">Shift+scroll: elevation | Ctrl+scroll: radius</p>
           </div>
         </div>
 
@@ -88,7 +94,7 @@
             <span id="warp-scale-value">0.015</span>
           </label>
 
-          <h3>Default Cell Noise</h3>
+          <h3>Surface Noise</h3>
           <label>
             Roughness:
             <input type="range" id="default-roughness" min="0" max="1" step="0.05" value="0.3">
@@ -116,8 +122,8 @@
         <div id="hydrology-settings" style="display: none;">
           <h3>Global Settings</h3>
           <label class="toggle-label">
-            <input type="checkbox" id="multiridge-enabled">
-            Multiridge Watershed
+            <input type="checkbox" id="auto-detect-sources">
+            Auto-detect Sources
           </label>
           <label class="toggle-label">
             <input type="checkbox" id="river-carving" checked>
@@ -151,7 +157,7 @@
             Show Watersheds
           </label>
           <label class="toggle-label">
-            <input type="checkbox" id="show-water-sources">
+            <input type="checkbox" id="show-water-sources" checked>
             Show Water Sources
           </label>
 
@@ -186,39 +192,40 @@
         </div>
       </aside>
     </main>
-    
+
     <footer id="toolbar">
       <div id="tools">
-        <button id="tool-select" class="tool active" title="Select vertices or half-cells (drag to move)">
-          <span class="icon">⬚</span> Select
+        <button id="tool-select" class="tool active" title="Select blobs (drag center to move, drag edge to resize)">
+          <span class="icon">&#x2B1C;</span> Select
         </button>
-        <button id="tool-draw" class="tool" title="Draw spine (click to add points, double-click or right-click to finish, Esc to cancel)">
-          <span class="icon">✎</span> Draw
+        <button id="tool-add" class="tool" title="Add blob (click to place, inherits last settings)">
+          <span class="icon">+</span> Add
         </button>
-        <button id="tool-delete" class="tool" title="Delete spine (click on spine to remove)">
-          <span class="icon">✕</span> Delete
+        <button id="tool-delete" class="tool" title="Delete blob (click on blob to remove)">
+          <span class="icon">&#x2715;</span> Delete
         </button>
         <!-- Hydrology tools (Tab 3 only) -->
         <button id="tool-add-source" class="tool hydrology-tool" title="Add water source" style="display: none;">
-          <span class="icon">💧</span> Source
+          <span class="icon">&#x1F4A7;</span> Source
         </button>
         <button id="tool-add-lake" class="tool hydrology-tool" title="Add lake marker" style="display: none;">
-          <span class="icon">🌊</span> Lake
+          <span class="icon">&#x1F30A;</span> Lake
         </button>
         <span class="tool-separator"></span>
-        <button id="clear-canvas" class="tool-action" title="Clear all spines">
-          <span class="icon">🗑</span> Clear
+        <button id="clear-canvas" class="tool-action" title="Clear all blobs">
+          <span class="icon">&#x1F5D1;</span> Clear
         </button>
       </div>
       <div id="view-controls">
         <label><input type="checkbox" id="show-elevation" checked> Elevation</label>
         <label><input type="checkbox" id="show-contours"> Contours</label>
+        <label><input type="checkbox" id="show-cells" checked> Cells</label>
         <label>Seed: <input type="number" id="seed" value="42"></label>
-        <button id="randomize">🎲</button>
+        <button id="randomize">&#x1F3B2;</button>
       </div>
     </footer>
   </div>
-  
+
   <script type="module" src="app.js"></script>
 </body>
 </html>
