@@ -168,11 +168,11 @@ function getWarpFunction(world) {
  * @param {number} x - World X coordinate
  * @param {number} z - World Z coordinate
  * @param {Object} options - Sampling options
- * @param {boolean} [options.includeNoise=true] - Whether to add surface noise
+ * @param {boolean} [options.includeNoise=false] - Whether to add surface noise
  * @returns {number} Elevation in [0, 1]
  */
 export function sampleElevation(world, x, z, options = {}) {
-  const { includeNoise = true } = options;
+  const { includeNoise = false } = options;
   const spines = world.template?.spines;
   const baseElevation = world.defaults?.baseElevation ?? 0.1;
   const blendWidth = world.defaults?.blendWidth ?? DEFAULT_BLEND_WIDTH;

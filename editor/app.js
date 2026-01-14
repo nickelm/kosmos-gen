@@ -73,7 +73,6 @@ const state = {
   // Display options
   showElevation: true,
   showElevationContours: false,
-  showNoisy: true,  // Tab 2: show noisy elevation (vs clean)
 
   // Contour cache (invalidated when spines/profiles change)
   cache: {
@@ -387,7 +386,7 @@ function drawOceanFill() {
 }
 
 /**
- * Draw terrain elevation as color-coded rectangles
+ * Draw terrain elevation as color-coded rectangles with hillshade
  * Draws land AND shallow ocean (elevation > 0), deep ocean (0) shows through
  */
 function drawLandElevation() {
@@ -396,22 +395,53 @@ function drawLandElevation() {
   const world = buildWorld();
   const step = 4; // Sample every 4 pixels
 
-  // In Tab 2 (noise), apply noise to elevation if toggle is on
-  const applyNoise = state.currentTab === 'noise' && state.showNoisy;
+  // Phase 1 (spines) = idealized/clean, Phase 2+ (noise) = noisy
+  const applyNoise = state.currentTab !== 'spines';
+
+  // Hillshade setup
+  // Gradient offset in world units (half a pixel step)
+  const gradientOffset = step * 0.5 / state.view.zoom;
+
+  // Light direction (from NW above) - pre-normalized
+  const lightDir = { x: -0.577, y: 0.577, z: -0.577 }; // normalized (-1,1,-1)
+
+  // Helper to sample elevation based on current phase
+  const sample = (wx, wz) => applyNoise
+    ? sampleElevationWithNoise(world, wx, wz, true)
+    : sampleElevation(world, wx, wz);
 
   for (let cy = 0; cy < canvas.height; cy += step) {
     for (let cx = 0; cx < canvas.width; cx += step) {
       const { x, z } = canvasToWorld(cx, cy);
 
-      const elevation = applyNoise
-        ? sampleElevationWithNoise(world, x, z, true)
-        : sampleElevation(world, x, z);
+      const elevation = sample(x, z);
 
       // Skip deep ocean (elevation = 0) - ocean fill shows through
       if (elevation <= 0) continue;
 
+      // Compute hillshade using finite difference gradients
+      const elevE = sample(x + gradientOffset, z);
+      const elevS = sample(x, z + gradientOffset);
+
+      const dEdx = (elevE - elevation) / gradientOffset;
+      const dEdz = (elevS - elevation) / gradientOffset;
+
+      // Surface normal: (-dE/dx, 1, -dE/dz) with slope exaggeration
+      const slopeScale = 3.0; // Exaggerate slopes for visual clarity
+      const nx = -dEdx * slopeScale;
+      const ny = 1;
+      const nz = -dEdz * slopeScale;
+      const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
+
+      // Dot product with light direction (light is pre-normalized)
+      const dot = (nx * lightDir.x + ny * lightDir.y + nz * lightDir.z) / nLen;
+
+      // Shade factor: map dot product to [0.5, 1.0] range for subtle effect
+      const shade = 0.5 + 0.5 * Math.max(0, dot);
+
+      // Get base color and apply hillshade
       const [r, g, b] = elevationToColor(elevation);
-      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      ctx.fillStyle = `rgb(${Math.round(r * shade)}, ${Math.round(g * shade)}, ${Math.round(b * shade)})`;
       ctx.fillRect(cx, cy, step, step);
     }
   }
@@ -1217,6 +1247,8 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelector('.tab.active').classList.remove('active');
     tab.classList.add('active');
     state.currentTab = tab.dataset.tab;
+    // Invalidate cache when switching tabs (noise changes between phases)
+    state.cache.cacheKey = null;
     updateTabUI();
     render();
   });
@@ -1227,22 +1259,22 @@ document.querySelectorAll('.tab').forEach(tab => {
  */
 function updateTabUI() {
   const noiseSettings = document.getElementById('noise-settings');
-  const noiseViewToggle = document.getElementById('noise-view-toggle');
   const halfCellNoiseProps = document.getElementById('halfcell-noise-props');
 
   if (state.currentTab === 'noise') {
-    // Show noise panel and toggle
+    // Show noise panel
     noiseSettings.style.display = 'block';
-    noiseViewToggle.style.display = 'inline';
     // Enable warp for Tab 2
-    if (!state.template.defaults.warp.enabled) {
-      state.template.defaults.warp.enabled = true;
-      document.getElementById('warp-enabled').checked = true;
-    }
+    state.template.defaults.warp.enabled = true;
+    document.getElementById('warp-enabled').checked = true;
   } else {
-    // Hide noise panel and toggle
+    // Hide noise panel
     noiseSettings.style.display = 'none';
-    noiseViewToggle.style.display = 'none';
+    // Disable warp for Phase 1 (idealized terrain)
+    if (state.currentTab === 'spines') {
+      state.template.defaults.warp.enabled = false;
+      document.getElementById('warp-enabled').checked = false;
+    }
   }
 
   // Show/hide per-cell noise controls based on tab
@@ -1312,12 +1344,6 @@ document.getElementById('show-elevation').addEventListener('change', (e) => {
 
 document.getElementById('show-contours').addEventListener('change', (e) => {
   state.showElevationContours = e.target.checked;
-  render();
-});
-
-// Noisy toggle (Tab 2)
-document.getElementById('show-noisy').addEventListener('change', (e) => {
-  state.showNoisy = e.target.checked;
   render();
 });
 
