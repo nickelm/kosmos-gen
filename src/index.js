@@ -8,8 +8,23 @@
 export { seededRandom, deriveSeed } from './core/seeds.js';
 
 // Geometry
-export { computeVoronoi } from './geometry/voronoi.js';
+export {
+  computeVoronoi,
+  computeVoronoiCells,
+  computeHalfCellPolygons,
+  findHalfCellAt,
+  extractHalfCellBoundary,
+  clearHalfCellCache,
+  buildSeeds
+} from './geometry/voronoi.js';
 export { extractContours, simplifyPolyline, isClosedLoop } from './geometry/contour.js';
+export {
+  pointInPolygon,
+  splitPolygonByLine,
+  clipPolygonToBounds,
+  polygonArea,
+  polygonCentroid
+} from './geometry/polygon.js';
 
 // Terrain
 export { createSpine, getHalfCells } from './terrain/spine.js';

@@ -11,7 +11,7 @@
  */
 
 import { sampleElevation } from '../src/terrain/elevation.js';
-import { findHalfCellAt, extractHalfCellBoundary } from '../src/geometry/voronoi.js';
+import { findHalfCellAt, extractHalfCellBoundary, clearHalfCellCache, computeHalfCellPolygons } from '../src/geometry/voronoi.js';
 import { getSide, getHalfCellId, getHalfCellConfig, getHalfCells } from '../src/terrain/spine.js';
 import { extractContours, simplifyPolyline } from '../src/geometry/contour.js';
 
@@ -245,6 +245,8 @@ function invalidateContourCacheIfNeeded() {
     state.cache.elevationContours = null;
     state.cache.cellBoundaries = null;
     state.cache.cacheKey = currentKey;
+    // Also clear the Voronoi half-cell cache
+    clearHalfCellCache();
   }
 }
 
@@ -473,21 +475,20 @@ function halfCellsEqual(a, b) {
 function drawCellBoundaries() {
   if (state.template.spines.length === 0) return;
 
-  const world = buildWorld();
-
   // Initialize cache if needed
   if (!state.cache.cellBoundaries) {
     state.cache.cellBoundaries = new Map();
   }
 
-  // Get visible bounds with margin
+  // Get visible bounds with large margin for Voronoi computation
+  // Voronoi cells need to extend beyond visible area for correct boundaries
   const topLeft = canvasToWorld(0, 0);
   const bottomRight = canvasToWorld(canvas.width, canvas.height);
   const bounds = {
-    minX: Math.max(-1, topLeft.x - 0.1),
-    maxX: Math.min(1, bottomRight.x + 0.1),
-    minZ: Math.max(-1, topLeft.z - 0.1),
-    maxZ: Math.min(1, bottomRight.z + 0.1)
+    minX: Math.min(-10, topLeft.x - 1),
+    maxX: Math.max(10, bottomRight.x + 1),
+    minZ: Math.min(-10, topLeft.z - 1),
+    maxZ: Math.max(10, bottomRight.z + 1)
   };
 
   ctx.save();
@@ -504,8 +505,8 @@ function drawCellBoundaries() {
       if (!polylines) {
         polylines = extractHalfCellBoundary(
           spine.id, hc.vertexIndex, hc.side,
-          state.template.spines, world.voronoi.seeds,
-          bounds, 0.015
+          state.template.spines, null,
+          bounds
         );
         state.cache.cellBoundaries.set(cacheKey, polylines);
       }
@@ -893,18 +894,10 @@ function onMouseMove(e) {
 
   // Handle half-cell hover highlight in select mode
   if (state.currentTool === 'select') {
-    const { x, z } = canvasToWorld(mouse.x, mouse.y);
-    // Only check hover within world bounds
-    if (x >= -1 && x <= 1 && z >= -1 && z <= 1) {
-      const hovered = hitTestHalfCell(mouse.x, mouse.y);
-      if (!halfCellsEqual(hovered, state.hoveredHalfCell)) {
-        state.hoveredHalfCell = hovered;
-        canvas.style.cursor = hovered ? 'pointer' : 'default';
-        render();
-      }
-    } else if (state.hoveredHalfCell) {
-      state.hoveredHalfCell = null;
-      canvas.style.cursor = 'default';
+    const hovered = hitTestHalfCell(mouse.x, mouse.y);
+    if (!halfCellsEqual(hovered, state.hoveredHalfCell)) {
+      state.hoveredHalfCell = hovered;
+      canvas.style.cursor = hovered ? 'pointer' : 'default';
       render();
     }
   }
@@ -1107,15 +1100,20 @@ function distanceToSegmentWorld(px, pz, v1, v2) {
 function hitTestHalfCell(cx, cy) {
   const { x, z } = canvasToWorld(cx, cy);
 
-  // Skip outside world bounds
-  if (x < -1 || x > 1 || z < -1 || z > 1) return null;
+  if (state.template.spines.length === 0) return null;
 
-  const world = buildWorld();
-  const seeds = world.voronoi.seeds;
-  if (seeds.length === 0) return null;
+  // Get visible bounds with margin for Voronoi computation
+  const topLeft = canvasToWorld(0, 0);
+  const bottomRight = canvasToWorld(canvas.width, canvas.height);
+  const bounds = {
+    minX: Math.min(-10, topLeft.x - 1),
+    maxX: Math.max(10, bottomRight.x + 1),
+    minZ: Math.min(-10, topLeft.z - 1),
+    maxZ: Math.max(10, bottomRight.z + 1)
+  };
 
-  // Use shared findHalfCellAt for consistent behavior with boundary extraction
-  return findHalfCellAt(x, z, state.template.spines, seeds);
+  // Use shared findHalfCellAt with polygon-based lookup
+  return findHalfCellAt(x, z, state.template.spines, null, bounds);
 }
 
 // =============================================================================
@@ -1144,8 +1142,11 @@ document.querySelectorAll('.tool').forEach(tool => {
     state.currentTool = tool.id.replace('tool-', '');
     // Clear hover state when changing tools
     state.hoveredHalfCell = null;
-    // Set cursor based on tool
+    // Clear selection when switching to draw tool
     if (state.currentTool === 'draw') {
+      state.selectedSpine = null;
+      state.selectedVertex = null;
+      state.selectedHalfCell = null;
       canvas.style.cursor = 'crosshair';
     } else if (state.currentTool === 'delete') {
       canvas.style.cursor = 'not-allowed';

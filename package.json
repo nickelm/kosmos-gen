@@ -18,6 +18,9 @@
   ],
   "author": "",
   "license": "MIT",
+  "dependencies": {
+    "d3-delaunay": "^6.0.4"
+  },
   "devDependencies": {
     "vite": "^5.0.0"
   }
