@@ -12,7 +12,7 @@
 
 import { sampleElevation, SEA_LEVEL } from '../src/terrain/elevation.js';
 import { createBlob, generateBlobId, PROFILES, PROFILE_NAMES } from '../src/terrain/blob.js';
-import { computeBlobCells, findBlobAt, findNearestBlob, clearCellCache } from '../src/geometry/voronoi.js';
+import { computeBlobCells, findBlobAt, findNearestBlob } from '../src/geometry/voronoi.js';
 import { extractContours, simplifyPolyline } from '../src/geometry/contour.js';
 import { extractCoastline, DEFAULT_COASTLINE_CONFIG } from '../src/terrain/coastline.js';
 import { createFBmNoise, unipolar } from '../src/core/noise.js';
@@ -104,14 +104,196 @@ const state = {
   selectedSource: null,
   selectedLake: null,
 
-  // Contour cache
+  // Layered cache with dirty flags
   cache: {
+    // Layer 1: Voronoi (depends on blob positions only)
+    voronoi: null,
+    voronoiDirty: true,
+
+    // Layer 2: Elevation texture (depends on all blob params + noise config)
+    elevationCanvas: null,
+    elevationDirty: true,
+
+    // Layer 3: Derived features (depends on elevation)
     coastlinePolylines: null,
     elevationContours: null,
-    voronoiCells: null,
-    cacheKey: null
+    derivedDirty: true,
+
+    // Computed bounds covering all blobs (updated when blobs change)
+    textureBounds: null
   }
 };
+
+// =============================================================================
+// Cache Invalidation
+// =============================================================================
+
+const ELEVATION_TEXTURE_SIZE = 1024;
+
+function markVoronoiDirty() {
+  state.cache.voronoiDirty = true;
+  state.cache.elevationDirty = true;
+  state.cache.derivedDirty = true;
+}
+
+function markElevationDirty() {
+  state.cache.elevationDirty = true;
+  state.cache.derivedDirty = true;
+}
+
+// Deferred regeneration to coalesce rapid edits
+let regenerationScheduled = false;
+
+function scheduleRegeneration() {
+  if (regenerationScheduled) return;
+  regenerationScheduled = true;
+
+  requestAnimationFrame(() => {
+    regenerationScheduled = false;
+    regenerateIfNeeded();
+    render();
+  });
+}
+
+function regenerateIfNeeded() {
+  if (state.cache.voronoiDirty) {
+    // Voronoi uses fixed world bounds, not view bounds
+    const worldBounds = { minX: -10, maxX: 10, minZ: -10, maxZ: 10 };
+    state.cache.voronoi = computeBlobCells(state.template.blobs, worldBounds);
+    state.cache.voronoiDirty = false;
+  }
+
+  if (state.cache.elevationDirty && state.template.blobs.length > 0) {
+    regenerateElevationTexture();
+  }
+
+  if (state.cache.derivedDirty && state.template.blobs.length > 0) {
+    regenerateDerivedFeatures();
+  }
+}
+
+function computeTextureBounds() {
+  // Compute bounds that cover all blobs plus their radii, with margin
+  if (state.template.blobs.length === 0) {
+    return { minX: -1, maxX: 1, minZ: -1, maxZ: 1 };
+  }
+
+  let minX = Infinity, maxX = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+
+  for (const blob of state.template.blobs) {
+    minX = Math.min(minX, blob.x - blob.radius);
+    maxX = Math.max(maxX, blob.x + blob.radius);
+    minZ = Math.min(minZ, blob.z - blob.radius);
+    maxZ = Math.max(maxZ, blob.z + blob.radius);
+  }
+
+  // Add margin for coastline rendering
+  const margin = 0.2;
+  return {
+    minX: minX - margin,
+    maxX: maxX + margin,
+    minZ: minZ - margin,
+    maxZ: maxZ + margin
+  };
+}
+
+function regenerateElevationTexture() {
+  const world = buildWorld();
+
+  // Compute bounds from blobs
+  state.cache.textureBounds = computeTextureBounds();
+  const bounds = state.cache.textureBounds;
+
+  const size = ELEVATION_TEXTURE_SIZE;
+
+  // Create off-screen canvas if needed
+  if (!state.cache.elevationCanvas) {
+    state.cache.elevationCanvas = document.createElement('canvas');
+    state.cache.elevationCanvas.width = size;
+    state.cache.elevationCanvas.height = size;
+  }
+
+  const offCtx = state.cache.elevationCanvas.getContext('2d');
+  const imageData = offCtx.createImageData(size, size);
+  const data = imageData.data;
+
+  const applyNoise = state.currentTab !== 'terrain';
+  const sample = applyNoise
+    ? (x, z) => sampleElevationWithNoise(world, x, z, true)
+    : (x, z) => sampleElevation(world, x, z);
+
+  // Rasterize with shading
+  const gradientOffset = (bounds.maxX - bounds.minX) / size;
+  const lightDir = { x: -0.577, y: 0.577, z: -0.577 };
+
+  for (let py = 0; py < size; py++) {
+    const z = bounds.minZ + (py / size) * (bounds.maxZ - bounds.minZ);
+    for (let px = 0; px < size; px++) {
+      const x = bounds.minX + (px / size) * (bounds.maxX - bounds.minX);
+      const elevation = sample(x, z);
+
+      // Compute shading
+      let shade = 1.0;
+      if (elevation > 0) {
+        const elevE = sample(x + gradientOffset, z);
+        const elevS = sample(x, z + gradientOffset);
+        const dEdx = (elevE - elevation) / gradientOffset;
+        const dEdz = (elevS - elevation) / gradientOffset;
+        const slopeScale = 3.0;
+        const nx = -dEdx * slopeScale;
+        const ny = 1;
+        const nz = -dEdz * slopeScale;
+        const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        const dot = (nx * lightDir.x + ny * lightDir.y + nz * lightDir.z) / nLen;
+        shade = 0.5 + 0.5 * Math.max(0, dot);
+      }
+
+      const [r, g, b] = elevationToColor(elevation);
+      const idx = (py * size + px) * 4;
+      data[idx] = Math.round(r * shade);
+      data[idx + 1] = Math.round(g * shade);
+      data[idx + 2] = Math.round(b * shade);
+      data[idx + 3] = 255;
+    }
+  }
+
+  offCtx.putImageData(imageData, 0, 0);
+  state.cache.elevationDirty = false;
+}
+
+function regenerateDerivedFeatures() {
+  const world = buildWorld();
+  // Ensure bounds are computed (elevation texture should have set them)
+  if (!state.cache.textureBounds) {
+    state.cache.textureBounds = computeTextureBounds();
+  }
+  const bounds = state.cache.textureBounds;
+  const includeNoise = state.currentTab !== 'terrain';
+
+  state.cache.coastlinePolylines = extractCoastline(world, bounds, {
+    includeNoise,
+    resolution: DEFAULT_COASTLINE_CONFIG.resolution,
+    simplifyEpsilon: DEFAULT_COASTLINE_CONFIG.simplifyEpsilon
+  });
+
+  // Also regenerate elevation contours if enabled
+  if (state.showElevationContours) {
+    const resolution = 0.03;
+    const levels = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+    const sampleFn = (x, z) => sampleElevation(world, x, z);
+
+    state.cache.elevationContours = new Map();
+    for (const level of levels) {
+      if (level <= SEA_LEVEL) continue;
+      let polylines = extractContours(sampleFn, level, bounds, resolution);
+      polylines = polylines.map(pl => simplifyPolyline(pl, 0.008));
+      state.cache.elevationContours.set(level, polylines);
+    }
+  }
+
+  state.cache.derivedDirty = false;
+}
 
 // =============================================================================
 // Canvas Setup
@@ -266,29 +448,11 @@ function elevationToColor(e) {
 // Rendering
 // =============================================================================
 
-function getContourCacheKey() {
-  const blobData = JSON.stringify(state.template.blobs.map(b => ({
-    id: b.id, x: b.x, z: b.z, elevation: b.elevation, radius: b.radius, profile: b.profile
-  })));
-  const defaults = JSON.stringify(state.template.defaults);
-  const viewData = `${state.view.offsetX.toFixed(0)},${state.view.offsetY.toFixed(0)},${state.view.zoom.toFixed(0)}`;
-  return `${blobData}|${defaults}|${viewData}`;
-}
-
-function invalidateContourCacheIfNeeded() {
-  const currentKey = getContourCacheKey();
-  if (state.cache.cacheKey !== currentKey) {
-    state.cache.coastlinePolylines = null;
-    state.cache.elevationContours = null;
-    state.cache.voronoiCells = null;
-    state.cache.cacheKey = currentKey;
-    clearCellCache();
-  }
-}
-
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  invalidateContourCacheIfNeeded();
+
+  // Regenerate cached data if dirty
+  regenerateIfNeeded();
 
   drawOceanFill();
   drawLandElevation();
@@ -326,48 +490,27 @@ function render() {
 }
 
 function drawOceanFill() {
-  ctx.fillStyle = '#1a4c6e';
+  // Deep ocean color
+  ctx.fillStyle = '#0a2540';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 function drawLandElevation() {
   if (!state.showElevation || state.template.blobs.length === 0) return;
+  if (!state.cache.elevationCanvas || !state.cache.textureBounds) return;
 
-  const world = buildWorld();
-  const step = 4;
-  const applyNoise = state.currentTab !== 'terrain';
-  const gradientOffset = step * 0.5 / state.view.zoom;
-  const lightDir = { x: -0.577, y: 0.577, z: -0.577 };
+  // Draw cached elevation texture with view transform
+  const bounds = state.cache.textureBounds;
+  const topLeft = worldToCanvas(bounds.minX, bounds.minZ);
+  const bottomRight = worldToCanvas(bounds.maxX, bounds.maxZ);
 
-  const sample = (wx, wz) => applyNoise
-    ? sampleElevationWithNoise(world, wx, wz, true)
-    : sampleElevation(world, wx, wz);
-
-  for (let cy = 0; cy < canvas.height; cy += step) {
-    for (let cx = 0; cx < canvas.width; cx += step) {
-      const { x, z } = canvasToWorld(cx, cy);
-      const elevation = sample(x, z);
-
-      if (elevation <= 0) continue;
-
-      const elevE = sample(x + gradientOffset, z);
-      const elevS = sample(x, z + gradientOffset);
-      const dEdx = (elevE - elevation) / gradientOffset;
-      const dEdz = (elevS - elevation) / gradientOffset;
-
-      const slopeScale = 3.0;
-      const nx = -dEdx * slopeScale;
-      const ny = 1;
-      const nz = -dEdz * slopeScale;
-      const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
-      const dot = (nx * lightDir.x + ny * lightDir.y + nz * lightDir.z) / nLen;
-      const shade = 0.5 + 0.5 * Math.max(0, dot);
-
-      const [r, g, b] = elevationToColor(elevation);
-      ctx.fillStyle = `rgb(${Math.round(r * shade)}, ${Math.round(g * shade)}, ${Math.round(b * shade)})`;
-      ctx.fillRect(cx, cy, step, step);
-    }
-  }
+  ctx.drawImage(
+    state.cache.elevationCanvas,
+    topLeft.x,
+    topLeft.y,
+    bottomRight.x - topLeft.x,
+    bottomRight.y - topLeft.y
+  );
 }
 
 function getVisibleBounds() {
@@ -383,27 +526,7 @@ function getVisibleBounds() {
 
 function drawCoastlinePolygons() {
   if (state.template.blobs.length === 0) return;
-
-  if (!state.cache.coastlinePolylines) {
-    const world = buildWorld();
-    const visible = getVisibleBounds();
-    const margin = 0.2;
-    const bounds = {
-      minX: visible.minX - margin,
-      maxX: visible.maxX + margin,
-      minZ: visible.minZ - margin,
-      maxZ: visible.maxZ + margin
-    };
-
-    const includeNoise = state.currentTab !== 'terrain';
-    const polylines = extractCoastline(world, bounds, {
-      includeNoise,
-      resolution: DEFAULT_COASTLINE_CONFIG.resolution,
-      simplifyEpsilon: DEFAULT_COASTLINE_CONFIG.simplifyEpsilon
-    });
-
-    state.cache.coastlinePolylines = polylines;
-  }
+  if (!state.cache.coastlinePolylines) return;
 
   ctx.strokeStyle = '#4ecdc4';
   ctx.lineWidth = 2.5;
@@ -428,31 +551,7 @@ function drawCoastlinePolygons() {
 
 function drawElevationContours() {
   if (state.template.blobs.length === 0) return;
-
-  const world = buildWorld();
-
-  if (!state.cache.elevationContours) {
-    const visible = getVisibleBounds();
-    const margin = 0.1;
-    const bounds = {
-      minX: visible.minX - margin,
-      maxX: visible.maxX + margin,
-      minZ: visible.minZ - margin,
-      maxZ: visible.maxZ + margin
-    };
-    const resolution = 0.03;
-    const levels = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
-    const sampleFn = (x, z) => sampleElevation(world, x, z);
-
-    state.cache.elevationContours = new Map();
-
-    for (const level of levels) {
-      if (level <= SEA_LEVEL) continue;
-      let polylines = extractContours(sampleFn, level, bounds, resolution);
-      polylines = polylines.map(pl => simplifyPolyline(pl, 0.008));
-      state.cache.elevationContours.set(level, polylines);
-    }
-  }
+  if (!state.cache.elevationContours) return;
 
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -527,7 +626,8 @@ function drawGrid() {
   const minZ = Math.floor(topLeft.z / minorStep) * minorStep;
   const maxZ = Math.ceil(bottomRight.z / minorStep) * minorStep;
 
-  ctx.strokeStyle = '#1a2a4a';
+  // Minor grid lines - subtle warm tan
+  ctx.strokeStyle = 'rgba(180, 150, 100, 0.15)';
   ctx.lineWidth = 1;
 
   for (let x = minX; x <= maxX; x += minorStep) {
@@ -550,8 +650,9 @@ function drawGrid() {
     ctx.stroke();
   }
 
-  ctx.strokeStyle = '#2a3a5a';
-  ctx.lineWidth = 2;
+  // Major grid lines - more visible warm tan
+  ctx.strokeStyle = 'rgba(180, 150, 100, 0.3)';
+  ctx.lineWidth = 1;
 
   for (let x = Math.floor(minX); x <= Math.ceil(maxX); x += majorStep) {
     const p1 = worldToCanvas(x, minZ);
@@ -571,7 +672,8 @@ function drawGrid() {
     ctx.stroke();
   }
 
-  ctx.strokeStyle = '#3a4a6a';
+  // Origin axes - bright warm accent
+  ctx.strokeStyle = 'rgba(220, 180, 100, 0.5)';
   ctx.lineWidth = 2;
 
   if (minZ <= 0 && maxZ >= 0) {
@@ -648,20 +750,23 @@ function drawCursorPreview() {
   const { x, z } = canvasToWorld(state.mousePos.x, state.mousePos.y);
   const p = worldToCanvas(x, z);
 
-  // Ghost radius circle
+  // Ghost radius circle - bright and visible
   ctx.beginPath();
   ctx.arc(p.x, p.y, state.toolDefaults.radius * state.view.zoom, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(233, 69, 96, 0.4)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = 'rgba(255, 180, 80, 0.8)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Ghost center
+  // Ghost center - solid and visible
   ctx.beginPath();
   ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(233, 69, 96, 0.5)';
+  ctx.fillStyle = 'rgba(255, 180, 80, 0.9)';
   ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 }
 
 // =============================================================================
@@ -928,6 +1033,7 @@ function onMouseDown(e) {
     state.toolDefaults.radius = newBlob.radius;
     state.toolDefaults.profile = newBlob.profile;
 
+    markVoronoiDirty();
     render();
   } else if (state.currentTool === 'select') {
     // Check if clicking on a blob center
@@ -960,6 +1066,7 @@ function onMouseDown(e) {
         if (state.selectedBlob === hitBlob) {
           state.selectedBlob = null;
         }
+        markVoronoiDirty();
       }
     }
     render();
@@ -1001,6 +1108,7 @@ function onMouseMove(e) {
     const world = canvasToWorld(mouse.x, mouse.y);
     state.selectedBlob.x = world.x;
     state.selectedBlob.z = world.z;
+    markVoronoiDirty();
     render();
     return;
   }
@@ -1011,23 +1119,25 @@ function onMouseMove(e) {
     const dz = world.z - state.selectedBlob.z;
     state.selectedBlob.radius = Math.max(0.05, Math.sqrt(dx * dx + dz * dz));
     state.toolDefaults.radius = state.selectedBlob.radius;
+    markElevationDirty();
     render();
     return;
   }
 
-  // Hover detection
-  if (state.currentTool === 'select' || state.currentTool === 'delete') {
+  // Hover detection (for select, delete, and add tools - enables shift+wheel in all modes)
+  if (state.currentTool === 'select' || state.currentTool === 'delete' || state.currentTool === 'add') {
     const hitBlob = hitTestBlobCenter(mouse.x, mouse.y) || hitTestBlobRadius(mouse.x, mouse.y);
     if (hitBlob !== state.hoveredBlob) {
       state.hoveredBlob = hitBlob;
-      canvas.style.cursor = hitBlob ? 'pointer' : 'default';
+      // Only change cursor in select/delete modes, keep crosshair in add mode
+      if (state.currentTool !== 'add') {
+        canvas.style.cursor = hitBlob ? 'pointer' : 'default';
+      }
+      render();
+    } else if (state.currentTool === 'add') {
+      // Still need to render for cursor preview in add mode
       render();
     }
-  }
-
-  // Cursor preview for add tool
-  if (state.currentTool === 'add') {
-    render();
   }
 }
 
@@ -1057,6 +1167,7 @@ function onKeyDown(e) {
     if (index !== -1) {
       state.template.blobs.splice(index, 1);
       state.selectedBlob = null;
+      markVoronoiDirty();
       render();
     }
   }
@@ -1070,11 +1181,16 @@ function onWheel(e) {
 
   // Shift+wheel: adjust elevation of selected or hovered blob
   if (e.shiftKey) {
-    const blob = state.selectedBlob || state.hoveredBlob;
+    // If hovering a blob, select it first
+    if (state.hoveredBlob && state.hoveredBlob !== state.selectedBlob) {
+      state.selectedBlob = state.hoveredBlob;
+    }
+    const blob = state.selectedBlob;
     if (blob) {
       const delta = e.deltaY > 0 ? -0.05 : 0.05;
       blob.elevation = Math.max(0, Math.min(1, blob.elevation + delta));
       state.toolDefaults.elevation = blob.elevation;
+      markElevationDirty();
       render();
       return;
     }
@@ -1082,11 +1198,16 @@ function onWheel(e) {
 
   // Ctrl+wheel: adjust radius of selected or hovered blob
   if (e.ctrlKey) {
-    const blob = state.selectedBlob || state.hoveredBlob;
+    // If hovering a blob, select it first
+    if (state.hoveredBlob && state.hoveredBlob !== state.selectedBlob) {
+      state.selectedBlob = state.hoveredBlob;
+    }
+    const blob = state.selectedBlob;
     if (blob) {
       const delta = e.deltaY > 0 ? -0.02 : 0.02;
       blob.radius = Math.max(0.05, Math.min(1, blob.radius + delta));
       state.toolDefaults.radius = blob.radius;
+      markElevationDirty();
       render();
       return;
     }
@@ -1152,7 +1273,8 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelector('.tab.active').classList.remove('active');
     tab.classList.add('active');
     state.currentTab = tab.dataset.tab;
-    state.cache.cacheKey = null;
+    // Tab switch may toggle noise, so invalidate elevation
+    markElevationDirty();
     updateTabUI();
     render();
   });
@@ -1209,18 +1331,21 @@ document.querySelectorAll('.tool').forEach(tool => {
 
 document.getElementById('seed').addEventListener('change', (e) => {
   state.seed = parseInt(e.target.value) || 0;
+  markElevationDirty();
   render();
 });
 
 document.getElementById('randomize').addEventListener('click', () => {
   state.seed = Math.floor(Math.random() * 100000);
   document.getElementById('seed').value = state.seed;
+  markElevationDirty();
   render();
 });
 
 document.getElementById('clear-canvas').addEventListener('click', () => {
   if (state.template.blobs.length === 0) return;
   if (confirm('Clear all blobs? This cannot be undone.')) {
+    markVoronoiDirty();
     state.template.blobs = [];
     state.selectedBlob = null;
     state.hoveredBlob = null;
@@ -1235,6 +1360,10 @@ document.getElementById('show-elevation').addEventListener('change', (e) => {
 
 document.getElementById('show-contours').addEventListener('change', (e) => {
   state.showElevationContours = e.target.checked;
+  // If enabling contours and they're not cached, mark derived as dirty
+  if (e.target.checked && !state.cache.elevationContours) {
+    state.cache.derivedDirty = true;
+  }
   render();
 });
 
@@ -1251,6 +1380,7 @@ document.getElementById('show-cells')?.addEventListener('change', (e) => {
 document.getElementById('warp-enabled').addEventListener('change', (e) => {
   state.template.defaults.warp.enabled = e.target.checked;
   noiseCache.cacheKey = null;
+  markElevationDirty();
   render();
 });
 
@@ -1259,6 +1389,7 @@ document.getElementById('warp-strength').addEventListener('input', (e) => {
   state.template.defaults.warp.strength = value;
   document.getElementById('warp-strength-value').textContent = value.toFixed(3);
   noiseCache.cacheKey = null;
+  markElevationDirty();
   render();
 });
 
@@ -1267,6 +1398,7 @@ document.getElementById('warp-scale').addEventListener('input', (e) => {
   state.template.defaults.warp.scale = value;
   document.getElementById('warp-scale-value').textContent = value.toFixed(3);
   noiseCache.cacheKey = null;
+  markElevationDirty();
   render();
 });
 
@@ -1275,6 +1407,7 @@ document.getElementById('default-roughness').addEventListener('input', (e) => {
   state.template.defaults.noise.roughness = value;
   document.getElementById('default-roughness-value').textContent = value.toFixed(2);
   noiseCache.cacheKey = null;
+  markElevationDirty();
   render();
 });
 
@@ -1283,11 +1416,13 @@ document.getElementById('default-feature-scale').addEventListener('input', (e) =
   state.template.defaults.noise.featureScale = value;
   document.getElementById('default-feature-scale-value').textContent = value.toFixed(2);
   noiseCache.cacheKey = null;
+  markElevationDirty();
   render();
 });
 
 document.getElementById('micro-detail-enabled').addEventListener('change', (e) => {
   state.template.defaults.microDetail.enabled = e.target.checked;
+  markElevationDirty();
   render();
 });
 
@@ -1295,6 +1430,7 @@ document.getElementById('micro-detail-amplitude').addEventListener('input', (e) 
   const value = parseFloat(e.target.value);
   state.template.defaults.microDetail.amplitude = value;
   document.getElementById('micro-detail-amplitude-value').textContent = value.toFixed(3);
+  markElevationDirty();
   render();
 });
 
@@ -1389,6 +1525,7 @@ propElevation?.addEventListener('input', (e) => {
     state.selectedBlob.elevation = value;
     state.toolDefaults.elevation = value;
     propElevationValue.textContent = value.toFixed(2);
+    markElevationDirty();
     render();
   }
 });
@@ -1399,6 +1536,7 @@ propRadius?.addEventListener('input', (e) => {
     state.selectedBlob.radius = value;
     state.toolDefaults.radius = value;
     propRadiusValue.textContent = value.toFixed(2);
+    markElevationDirty();
     render();
   }
 });
@@ -1407,6 +1545,7 @@ propProfile?.addEventListener('change', (e) => {
   if (state.selectedBlob) {
     state.selectedBlob.profile = e.target.value;
     state.toolDefaults.profile = e.target.value;
+    markElevationDirty();
     render();
   }
 });
