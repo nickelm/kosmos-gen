@@ -46,6 +46,17 @@ export {
   sampleMicroDetail,
   DEFAULT_MICRO_DETAIL_CONFIG
 } from './terrain/microdetail.js';
+export {
+  extractCoastline,
+  extractBothCoastlines,
+  extractRefinedCoastline,
+  displaceCoastline,
+  displaceAllCoastlines,
+  filterSmallIslands,
+  getCoastlineStats,
+  SEA_LEVEL,
+  DEFAULT_COASTLINE_CONFIG
+} from './terrain/coastline.js';
 
 // World
 export { World } from './world/world.js';

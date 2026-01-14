@@ -14,6 +14,10 @@ import { sampleElevation } from '../src/terrain/elevation.js';
 import { findHalfCellAt, extractHalfCellBoundary, clearHalfCellCache, computeHalfCellPolygons } from '../src/geometry/voronoi.js';
 import { getSide, getHalfCellId, getHalfCellConfig, getHalfCells } from '../src/terrain/spine.js';
 import { extractContours, simplifyPolyline } from '../src/geometry/contour.js';
+import {
+  extractCoastline,
+  DEFAULT_COASTLINE_CONFIG
+} from '../src/terrain/coastline.js';
 import { createFBmNoise, unipolar } from '../src/core/noise.js';
 import { deriveSeed } from '../src/core/seeds.js';
 
@@ -474,8 +478,6 @@ function drawCoastlinePolygons() {
   // Extract contours if not cached
   if (!state.cache.coastlinePolylines) {
     const world = buildWorld();
-    // Sea level is fixed at 0.1 (baseElevation is now 0 = sea floor)
-    const seaLevel = 0.1;
 
     // Use visible bounds (with margin for smooth edges)
     const visible = getVisibleBounds();
@@ -486,14 +488,16 @@ function drawCoastlinePolygons() {
       minZ: visible.minZ - margin,
       maxZ: visible.maxZ + margin
     };
-    const resolution = 0.015; // Finer resolution for smoother coastlines
 
-    // Sample function
-    const sampleFn = (x, z) => sampleElevation(world, x, z);
+    // Phase 1 (spines) = smooth coastline, Phase 2+ (noise) = noisy coastline
+    const includeNoise = state.currentTab !== 'spines';
 
-    // Extract contours and simplify
-    let polylines = extractContours(sampleFn, seaLevel, bounds, resolution);
-    polylines = polylines.map(pl => simplifyPolyline(pl, 0.003));
+    // Use the coastline module for extraction
+    const polylines = extractCoastline(world, bounds, {
+      includeNoise,
+      resolution: DEFAULT_COASTLINE_CONFIG.resolution,
+      simplifyEpsilon: DEFAULT_COASTLINE_CONFIG.simplifyEpsilon
+    });
 
     state.cache.coastlinePolylines = polylines;
   }
