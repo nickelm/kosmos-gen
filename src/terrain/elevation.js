@@ -2,8 +2,10 @@
  * Elevation sampling from spine-Voronoi terrain
  */
 
-import { findCell } from '../geometry/voronoi.js';
 import { getSide, getHalfCellConfig } from './spine.js';
+
+/** Default blend width as fraction of influence radius */
+const DEFAULT_BLEND_WIDTH = 0.15;
 
 /**
  * Compute distance from a point to a line segment (clamped)
@@ -40,29 +42,87 @@ function distanceToSegment(px, pz, v1, v2) {
 }
 
 /**
- * Profile functions for elevation falloff
+ * Profile shape presets
+ *
+ * Maps named profiles to shape values for the Hermite curve.
+ * Negative shape: holds elevation longer (plateau-like)
+ * Zero shape: symmetric S-curve
+ * Positive shape: drops faster initially (bowl-like)
  */
-const PROFILES = {
-  /**
-   * Linear slope from spine to boundary
-   */
-  ramp: (t) => 1 - t,
-
-  /**
-   * Flat top with steep edges
-   */
-  plateau: (t) => t < 0.4 ? 1 : 1 - (t - 0.4) / 0.6,
-
-  /**
-   * Concave, collects water
-   */
-  bowl: (t) => 1 - t * t,
-
-  /**
-   * Convex, sheds water
-   */
-  shield: (t) => Math.sqrt(1 - t * t)
+const PROFILE_SHAPES = {
+  ramp: 0,       // Symmetric S-curve, smooth transition
+  plateau: -0.6, // Holds high, drops late
+  bowl: 0.5,     // Drops early, flattens at bottom
+  shield: -0.3   // Gentle dome, gradual descent
 };
+
+/**
+ * Hermite interpolation with zero slopes at both ends
+ *
+ * Uses cubic Hermite basis functions to create a smooth curve from
+ * elevation 1 (at spine, t=0) to elevation 0 (at boundary, t=1).
+ * Both endpoints have zero slope, guaranteeing C1 continuity at cell boundaries.
+ *
+ * The shape parameter biases the curve:
+ * - Negative: curve stays high longer before dropping (plateau-like)
+ * - Zero: symmetric S-curve
+ * - Positive: curve drops quickly then levels out (bowl-like)
+ *
+ * @param {number} t - Distance from spine, normalized [0, 1]
+ * @param {number} shape - Shape bias, typically [-1, 1]
+ * @returns {number} Elevation factor [0, 1]
+ */
+function hermiteProfile(t, shape) {
+  // Clamp t to valid range
+  const s = Math.max(0, Math.min(1, t));
+
+  // Apply shape bias by remapping t through a power curve
+  // This shifts where the steepest part of the curve occurs
+  let biasedT;
+  if (shape < 0) {
+    // Negative shape: t grows slowly at first (stays high longer)
+    biasedT = Math.pow(s, 1 / (1 - shape));
+  } else if (shape > 0) {
+    // Positive shape: t grows quickly at first (drops faster)
+    biasedT = Math.pow(s, 1 + shape);
+  } else {
+    biasedT = s;
+  }
+
+  // Cubic Hermite interpolation from 1 to 0 with zero slopes at both ends
+  // Using smoothstep: 3t² - 2t³ (derivative is 6t - 6t² which is 0 at t=0 and t=1)
+  const t2 = biasedT * biasedT;
+  const t3 = t2 * biasedT;
+
+  // smoothstep goes from 0 to 1, we want 1 to 0
+  return 1 - (3 * t2 - 2 * t3);
+}
+
+/**
+ * Get shape value from profile name or numeric value
+ * @param {string|number} profile - Profile name or shape value
+ * @returns {number} Shape value
+ */
+function getShapeValue(profile) {
+  if (typeof profile === 'number') {
+    return profile;
+  }
+  return PROFILE_SHAPES[profile] ?? PROFILE_SHAPES.ramp;
+}
+
+/**
+ * Smoothstep interpolation for blend transitions
+ *
+ * Maps input from [0, 1] to a smooth curve with zero derivatives at endpoints.
+ * Used to avoid discontinuities at blend zone edges.
+ *
+ * @param {number} t - Input value [0, 1]
+ * @returns {number} Smoothly interpolated value [0, 1]
+ */
+function smoothstep(t) {
+  const clamped = Math.max(0, Math.min(1, t));
+  return clamped * clamped * (3 - 2 * clamped);
+}
 
 /**
  * Sample elevation at a world position with smooth blending
@@ -75,6 +135,7 @@ const PROFILES = {
 export function sampleElevation(world, x, z) {
   const spines = world.template?.spines;
   const baseElevation = world.defaults?.baseElevation ?? 0.1;
+  const blendWidth = world.defaults?.blendWidth ?? DEFAULT_BLEND_WIDTH;
 
   // Handle empty world
   if (!spines || spines.length === 0) {
@@ -89,7 +150,7 @@ export function sampleElevation(world, x, z) {
     if (!spine.vertices || spine.vertices.length === 0) continue;
 
     // Find closest point on spine and compute elevation contribution
-    const result = getSpineContribution(x, z, spine, world, baseElevation);
+    const result = getSpineContribution(x, z, spine, world, baseElevation, blendWidth);
     if (!result) continue;
 
     const { elevation, weight } = result;
@@ -107,19 +168,43 @@ export function sampleElevation(world, x, z) {
 }
 
 /**
+ * Compute signed distance to the spine line (for left/right blending)
+ *
+ * @param {number} px - Point X
+ * @param {number} pz - Point Z
+ * @param {Object} v0 - Segment start vertex
+ * @param {Object} v1 - Segment end vertex
+ * @returns {number} Signed distance (negative = left, positive = right)
+ */
+function signedDistanceToSpine(px, pz, v0, v1) {
+  const dx = v1.x - v0.x;
+  const dz = v1.z - v0.z;
+  const len = Math.sqrt(dx * dx + dz * dz);
+  if (len === 0) return 0;
+
+  // Perpendicular vector (pointing right when walking from v0 to v1)
+  const perpX = -dz / len;
+  const perpZ = dx / len;
+
+  // Signed distance: positive = right side, negative = left side
+  return (px - v0.x) * perpX + (pz - v0.z) * perpZ;
+}
+
+/**
  * Get elevation contribution from a single spine
  *
  * @param {number} x - Query X
  * @param {number} z - Query Z
  * @param {Object} spine - Spine object
  * @param {Object} world - World object (for half-cell config)
- * @param {number} baseElevation - Default base elevation
+ * @param {number} baseElevation - Default base elevation (unused, kept for API)
+ * @param {number} blendWidth - Blend zone width as fraction of influence
  * @returns {{elevation: number, weight: number} | null}
  */
-function getSpineContribution(x, z, spine, world, baseElevation) {
+function getSpineContribution(x, z, spine, world, baseElevation, blendWidth) {
   const vertices = spine.vertices;
 
-  // Single vertex: pure radial
+  // Single vertex: pure radial (no blending needed - single cell)
   if (vertices.length === 1) {
     const v = vertices[0];
     const dist = Math.sqrt((x - v.x) ** 2 + (z - v.z) ** 2);
@@ -169,39 +254,132 @@ function getSpineContribution(x, z, spine, world, baseElevation) {
   // Determine side and vertex index for config lookup
   const v0 = vertices[bestSegIndex];
   const v1 = vertices[bestSegIndex + 1];
-  const side = getSide(x, z, v0, v1);
+  const primarySide = getSide(x, z, v0, v1);
 
   // Use the vertex closer to the projection point for config
   const vertexIndex = bestT < 0.5 ? bestSegIndex : bestSegIndex + 1;
 
-  const config = getHalfCellConfig(world, spine.id, vertexIndex, side);
-  const elevation = computeProfileElevation(bestSpineElevation, config.baseElevation, Math.min(1, normalizedDist), config.profile);
+  // Compute primary cell elevation
+  const primaryConfig = getHalfCellConfig(world, spine.id, vertexIndex, primarySide);
+  const primaryElevation = computeProfileElevation(
+    bestSpineElevation,
+    primaryConfig.baseElevation,
+    Math.min(1, normalizedDist),
+    primaryConfig.profile
+  );
+
+  // Check if we need to blend with the opposite side (left/right boundary)
+  let elevation = primaryElevation;
+
+  if (blendWidth > 0) {
+    // Compute signed distance to spine (the left/right boundary)
+    const signedDist = signedDistanceToSpine(x, z, v0, v1);
+    const absSignedDist = Math.abs(signedDist);
+
+    // Blend zone is defined as fraction of the local influence radius
+    const blendZone = bestInfluence * blendWidth;
+
+    // If within blend zone of the spine centerline, blend left/right
+    if (absSignedDist < blendZone) {
+      const neighborSide = primarySide === 'left' ? 'right' : 'left';
+      const neighborConfig = getHalfCellConfig(world, spine.id, vertexIndex, neighborSide);
+      const neighborElevation = computeProfileElevation(
+        bestSpineElevation,
+        neighborConfig.baseElevation,
+        Math.min(1, normalizedDist),
+        neighborConfig.profile
+      );
+
+      // Blend factor: 0.5 at spine centerline, 0 at blend zone edge
+      // absSignedDist / blendZone goes from 0 (at spine) to 1 (at edge)
+      const blendT = absSignedDist / blendZone;
+      const blendFactor = smoothstep(blendT);
+
+      // blendFactor=0 means we're at spine center, equal mix
+      // blendFactor=1 means we're at edge, use primary only
+      elevation = primaryElevation * blendFactor + neighborElevation * (1 - blendFactor);
+
+      // At the exact spine (blendT=0), we want 50/50 mix
+      // As we move toward primary side (blendT->1), we want 100% primary
+      // smoothstep(0) = 0, smoothstep(1) = 1
+      // So: elevation = primary * smoothstep(t) + neighbor * (1 - smoothstep(t))
+      // This gives 50/50 at center, 100% primary at edge
+    }
+
+    // Also blend across vertex boundaries (when bestT is near 0 or 1)
+    // This handles transitions between adjacent vertices on the same side
+    const vertexBlendThreshold = blendWidth;
+
+    if (bestT < vertexBlendThreshold && bestSegIndex > 0) {
+      // Near the start vertex, blend with previous segment's config
+      const prevVertexIndex = bestSegIndex;
+      const prevConfig = getHalfCellConfig(world, spine.id, prevVertexIndex, primarySide);
+
+      // Only blend if configs differ
+      if (prevConfig.profile !== primaryConfig.profile ||
+          prevConfig.baseElevation !== primaryConfig.baseElevation) {
+        const prevElevation = computeProfileElevation(
+          bestSpineElevation,
+          prevConfig.baseElevation,
+          Math.min(1, normalizedDist),
+          prevConfig.profile
+        );
+
+        const vertexBlendT = bestT / vertexBlendThreshold;
+        const vertexBlendFactor = smoothstep(vertexBlendT);
+        elevation = elevation * vertexBlendFactor + prevElevation * (1 - vertexBlendFactor);
+      }
+    } else if (bestT > (1 - vertexBlendThreshold) && bestSegIndex < vertices.length - 2) {
+      // Near the end vertex, blend with next segment's config
+      const nextVertexIndex = bestSegIndex + 1;
+      const nextConfig = getHalfCellConfig(world, spine.id, nextVertexIndex, primarySide);
+
+      // Only blend if configs differ
+      if (nextConfig.profile !== primaryConfig.profile ||
+          nextConfig.baseElevation !== primaryConfig.baseElevation) {
+        const nextElevation = computeProfileElevation(
+          bestSpineElevation,
+          nextConfig.baseElevation,
+          Math.min(1, normalizedDist),
+          nextConfig.profile
+        );
+
+        const vertexBlendT = (1 - bestT) / vertexBlendThreshold;
+        const vertexBlendFactor = smoothstep(vertexBlendT);
+        elevation = elevation * vertexBlendFactor + nextElevation * (1 - vertexBlendFactor);
+      }
+    }
+  }
+
   const weight = Math.max(0, 1 - normalizedDist * 0.8) ** 2;
 
   return { elevation, weight };
 }
 
 /**
- * Get profile function by name
- * @param {string} name - Profile name
- * @returns {Function} Profile function (t) => elevation
+ * Get shape value for a profile
+ * @param {string|number} profile - Profile name or shape value
+ * @returns {number} Shape value
  */
-export function getProfile(name) {
-  return PROFILES[name] || PROFILES.ramp;
+export function getProfileShape(profile) {
+  return getShapeValue(profile);
 }
 
 /**
- * Compute elevation from profile
+ * Compute elevation from profile using Hermite interpolation
+ *
+ * Uses cubic Hermite curves with zero slopes at both endpoints,
+ * guaranteeing C1 continuity at cell boundaries.
  *
  * @param {number} spineElevation - Elevation at spine vertex
  * @param {number} baseElevation - Elevation at cell boundary
  * @param {number} distance - Distance from spine (normalized 0-1)
- * @param {string} profile - Profile type
+ * @param {string|number} profile - Profile preset name or shape value
  * @returns {number} Elevation at this point
  */
 export function computeProfileElevation(spineElevation, baseElevation, distance, profile) {
-  const profileFn = getProfile(profile);
+  const shape = getShapeValue(profile);
   const t = Math.min(1, Math.max(0, distance));
-  const factor = profileFn(t);
+  const factor = hermiteProfile(t, shape);
   return baseElevation + (spineElevation - baseElevation) * factor;
 }

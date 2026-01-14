@@ -82,19 +82,29 @@ export function getHalfCellId(spineId, vertexIndex, side) {
 
 /**
  * Get merged configuration for a half-cell
+ *
+ * Half-cell config can specify elevation profile in two ways:
+ * - profile: Named preset ('ramp', 'plateau', 'bowl', 'shield')
+ * - shape: Numeric value for fine control (-1 to 1 typical range)
+ *
+ * If shape is provided, it takes precedence over profile name.
+ *
  * @param {Object} world - World object with halfCells and defaults
  * @param {string} spineId - Spine identifier
  * @param {number} vertexIndex - Vertex index
  * @param {'left' | 'right' | 'radial'} side - Side of spine
- * @returns {{profile: string, baseElevation: number, falloffCurve: number}}
+ * @returns {{profile: string|number, baseElevation: number, falloffCurve: number}}
  */
 export function getHalfCellConfig(world, spineId, vertexIndex, side) {
   const id = getHalfCellId(spineId, vertexIndex, side);
   const cellOverride = world.halfCells?.[id] || {};
   const defaults = world.defaults || {};
 
+  // Shape takes precedence if specified, otherwise use profile name
+  const profile = cellOverride.shape ?? cellOverride.profile ?? defaults.shape ?? defaults.profile ?? 'ramp';
+
   return {
-    profile: cellOverride.profile ?? defaults.profile ?? 'ramp',
+    profile,
     baseElevation: cellOverride.baseElevation ?? defaults.baseElevation ?? 0.1,
     falloffCurve: cellOverride.falloffCurve ?? defaults.falloffCurve ?? 0.5
   };

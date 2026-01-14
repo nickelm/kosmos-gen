@@ -13,7 +13,7 @@ export { extractContours, simplifyPolyline, isClosedLoop } from './geometry/cont
 
 // Terrain
 export { createSpine, getHalfCells } from './terrain/spine.js';
-export { sampleElevation } from './terrain/elevation.js';
+export { sampleElevation, computeProfileElevation, getProfileShape } from './terrain/elevation.js';
 
 // World
 export { World } from './world/world.js';
