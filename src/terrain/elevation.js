@@ -7,6 +7,7 @@ import { createDomainWarp, DEFAULT_WARP_CONFIG } from '../core/warp.js';
 import { sampleSurfaceNoise, DEFAULT_SURFACE_NOISE_CONFIG } from './surfacenoise.js';
 import { sampleRidgeNoise, DEFAULT_RIDGE_NOISE_CONFIG } from './ridgenoise.js';
 import { sampleMicroDetail, DEFAULT_MICRO_DETAIL_CONFIG } from './microdetail.js';
+import { sampleRiverCarving } from './rivercarving.js';
 
 /** Default blend width as fraction of influence radius */
 const DEFAULT_BLEND_WIDTH = 0.15;
@@ -171,10 +172,11 @@ function getWarpFunction(world) {
  * @param {number} z - World Z coordinate
  * @param {Object} options - Sampling options
  * @param {boolean} [options.includeNoise=false] - Whether to add surface noise
+ * @param {boolean} [options.includeHydrology=false] - Whether to apply river carving
  * @returns {number} Elevation in [0, 1]
  */
 export function sampleElevation(world, x, z, options = {}) {
-  const { includeNoise = false } = options;
+  const { includeNoise = false, includeHydrology = false } = options;
   const spines = world.template?.spines;
   const baseElevation = world.defaults?.baseElevation ?? 0.1;
   const blendWidth = world.defaults?.blendWidth ?? DEFAULT_BLEND_WIDTH;
@@ -245,8 +247,15 @@ export function sampleElevation(world, x, z, options = {}) {
     }
   }
 
-  // Clamp to valid range after all noise layers
-  if (includeNoise) {
+  // Apply river carving - lowers elevation along river channels
+  // Applied after noise so rivers cut through the noisy terrain
+  if (includeHydrology && world.rivers && world.rivers.length > 0) {
+    const carving = sampleRiverCarving(world, x, z);
+    elevation += carving; // carving is negative
+  }
+
+  // Clamp to valid range after all noise layers and carving
+  if (includeNoise || includeHydrology) {
     elevation = Math.max(0, Math.min(1, elevation));
   }
 

@@ -1,6 +1,6 @@
 /**
  * World - The core data structure for a generated world
- * 
+ *
  * A World can be:
  * - Generated from a template + seed
  * - Loaded from storage
@@ -8,6 +8,19 @@
  */
 
 import { sampleElevation } from '../terrain/elevation.js';
+
+// Default hydrology configuration
+export const DEFAULT_HYDROLOGY_CONFIG = {
+  multiridge: false,        // Enable multi-spine watershed interactions
+  autoDetect: true,         // Auto-suggest sources and lakes
+  carveEnabled: true,       // Rivers modify elevation
+  carveFactor: 0.02,        // Max carve depth per unit flow
+  riverThreshold: 50,       // Min accumulation to become river
+  lakeMinArea: 0.001,       // Min area for auto-detected lakes
+  gridResolution: 0.01,     // Flow grid cell size
+  baseRiverWidth: 0.005,    // Base river width at threshold flow
+  riverWidthScale: 1.0      // River width multiplier
+};
 
 export class World {
   /**
@@ -19,6 +32,9 @@ export class World {
    * @param {Object} data.halfCells - Half-cell configurations
    * @param {Array} data.rivers - River polylines
    * @param {Array} data.lakes - Lake polygons
+   * @param {Array} data.waterSources - Water source locations
+   * @param {Object} data.flowGrid - Flow grid for hydrology
+   * @param {Object} data.hydrologyConfig - Hydrology configuration
    * @param {Array} data.zones - Zone placements
    * @param {Object} data.sdf - Distance field textures
    */
@@ -30,8 +46,14 @@ export class World {
     this.halfCells = data.halfCells || {};
     this.rivers = data.rivers || [];
     this.lakes = data.lakes || [];
+    this.waterSources = data.waterSources || [];
+    this.flowGrid = data.flowGrid || null;
+    this.hydrologyConfig = { ...DEFAULT_HYDROLOGY_CONFIG, ...data.hydrologyConfig };
     this.zones = data.zones || [];
     this.sdf = data.sdf || null;
+
+    // Propagate defaults from template if present
+    this.defaults = data.template?.defaults || data.defaults || {};
   }
   
   /**
@@ -79,8 +101,10 @@ export class World {
       halfCells: this.halfCells,
       rivers: this.rivers,
       lakes: this.lakes,
+      waterSources: this.waterSources,
+      hydrologyConfig: this.hydrologyConfig,
       zones: this.zones
-      // Note: SDF textures serialized separately as ArrayBuffers
+      // Note: SDF textures and flowGrid serialized separately as ArrayBuffers
     };
   }
   

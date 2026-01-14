@@ -20,6 +20,9 @@ import {
 } from '../src/terrain/coastline.js';
 import { createFBmNoise, unipolar } from '../src/core/noise.js';
 import { deriveSeed } from '../src/core/seeds.js';
+import { generateHydrology, DEFAULT_HYDROLOGY_CONFIG } from '../src/terrain/hydrology.js';
+import { createManualSource } from '../src/terrain/watersources.js';
+import { createManualLake } from '../src/terrain/lakes.js';
 
 // =============================================================================
 // State
@@ -81,6 +84,24 @@ const state = {
   // Display options
   showElevation: true,
   showElevationContours: false,
+
+  // Hydrology state (Tab 3)
+  hydrology: {
+    rivers: [],
+    lakes: [],
+    waterSources: [],
+    flowGrid: null,
+    config: { ...DEFAULT_HYDROLOGY_CONFIG, autoDetect: false },
+    cacheKey: null,
+    // Display options
+    showFlowGrid: false,
+    showWatersheds: false,
+    showWaterSources: true
+  },
+
+  // Hydrology selection
+  selectedSource: null,
+  selectedLake: null,
 
   // Contour cache (invalidated when spines/profiles change)
   cache: {
@@ -348,6 +369,9 @@ function render() {
 
   invalidateContourCacheIfNeeded();
 
+  // Hydrology only updates when explicitly triggered (button or on Tab 3+)
+  // Note: We no longer auto-update here - user must click "Simulate Water"
+
   // Layer 1: Ocean fill (solid blue over world bounds)
   drawOceanFill();
 
@@ -362,20 +386,42 @@ function render() {
   // Layer 4: Coastline (vector strokes)
   drawCoastlinePolygons();
 
-  // Layer 5: Cell boundaries (dashed lines for all cells)
+  // Layer 5: Flow grid debug overlay (Tab 3 only)
+  if (state.currentTab === 'hydrology') {
+    drawFlowGrid();
+  }
+
+  // Layer 6: Lakes (Tab 3+ only - hydrology and beyond)
+  if (state.currentTab === 'hydrology' || state.currentTab === 'climate' ||
+      state.currentTab === 'zones' || state.currentTab === 'content') {
+    drawLakes();
+  }
+
+  // Layer 7: Rivers (Tab 3+ only - hydrology and beyond)
+  if (state.currentTab === 'hydrology' || state.currentTab === 'climate' ||
+      state.currentTab === 'zones' || state.currentTab === 'content') {
+    drawRivers();
+  }
+
+  // Layer 8: Water sources (Tab 3 only when enabled)
+  if (state.currentTab === 'hydrology') {
+    drawWaterSources();
+  }
+
+  // Layer 9: Cell boundaries (dashed lines for all cells)
   drawCellBoundaries();
 
-  // Layer 6: Hovered cell highlight (cyan) - only if different from selected
+  // Layer 10: Hovered cell highlight (cyan) - only if different from selected
   if (state.hoveredHalfCell && !halfCellsEqual(state.hoveredHalfCell, state.selectedHalfCell)) {
     drawHighlightedCell(state.hoveredHalfCell, 'rgba(78, 205, 196, 0.2)', '#4ecdc4');
   }
 
-  // Layer 7: Selected cell highlight (red)
+  // Layer 11: Selected cell highlight (red)
   if (state.selectedHalfCell) {
     drawHighlightedCell(state.selectedHalfCell, 'rgba(233, 69, 96, 0.3)', '#e94560');
   }
 
-  // Layer 8: Grid, boundary, spines, vertices
+  // Layer 12: Grid, boundary, spines, vertices
   drawGrid();
   drawWorldBoundary();
   drawSpines();
@@ -888,6 +934,268 @@ function drawVertices() {
 }
 
 // =============================================================================
+// Hydrology Rendering (Tab 3)
+// =============================================================================
+
+/**
+ * Generate cache key for hydrology invalidation
+ */
+function getHydrologyCacheKey() {
+  const spineData = JSON.stringify(state.template.spines.map(s => ({
+    id: s.id,
+    vertices: s.vertices.map(v => ({
+      x: v.x, z: v.z, elevation: v.elevation, influence: v.influence
+    }))
+  })));
+  const halfCellData = JSON.stringify(state.template.halfCells);
+  const configData = JSON.stringify(state.hydrology.config);
+  const sourcesData = JSON.stringify(state.hydrology.waterSources.filter(s => s.origin === 'manual'));
+  return `${state.seed}|${spineData}|${halfCellData}|${configData}|${sourcesData}`;
+}
+
+/**
+ * Run hydrology simulation explicitly (triggered by button)
+ */
+function runHydrologySimulation() {
+  if (state.template.spines.length === 0) {
+    state.hydrology.rivers = [];
+    state.hydrology.lakes = [];
+    state.hydrology.waterSources = [];
+    state.hydrology.flowGrid = null;
+    render();
+    return;
+  }
+
+  // Build world for hydrology generation
+  const world = buildWorld();
+  world.hydrologyConfig = state.hydrology.config;
+  world.waterSources = state.hydrology.waterSources.filter(s => s.origin === 'manual');
+  world.lakes = state.hydrology.lakes.filter(l => l.origin === 'manual');
+
+  // Calculate bounds from terrain - find the extent of all spines with margin
+  const bounds = calculateTerrainBounds();
+
+  try {
+    const result = generateHydrology(world, { bounds });
+
+    state.hydrology.rivers = result.rivers;
+    state.hydrology.lakes = result.lakes;
+    state.hydrology.waterSources = result.waterSources;
+    state.hydrology.flowGrid = result.flowGrid;
+    state.hydrology.cacheKey = getHydrologyCacheKey();
+
+    console.log(`Hydrology: ${result.rivers.length} rivers, ${result.lakes.length} lakes, ${result.waterSources.length} sources`);
+  } catch (err) {
+    console.error('Hydrology generation failed:', err);
+  }
+
+  render();
+}
+
+/**
+ * Calculate terrain bounds from spines (for flow grid)
+ */
+function calculateTerrainBounds() {
+  if (state.template.spines.length === 0) {
+    return { minX: -1, maxX: 1, minZ: -1, maxZ: 1 };
+  }
+
+  let minX = Infinity, maxX = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+
+  for (const spine of state.template.spines) {
+    for (const v of spine.vertices) {
+      // Include influence radius in bounds
+      const radius = v.influence / 100; // Convert from percentage
+      minX = Math.min(minX, v.x - radius);
+      maxX = Math.max(maxX, v.x + radius);
+      minZ = Math.min(minZ, v.z - radius);
+      maxZ = Math.max(maxZ, v.z + radius);
+    }
+  }
+
+  // Add margin for edge effects
+  const margin = 0.1;
+  return {
+    minX: minX - margin,
+    maxX: maxX + margin,
+    minZ: minZ - margin,
+    maxZ: maxZ + margin
+  };
+}
+
+/**
+ * Draw rivers as blue polylines with variable width
+ */
+function drawRivers() {
+  const rivers = state.hydrology.rivers;
+  if (!rivers || rivers.length === 0) return;
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (const river of rivers) {
+    if (!river.vertices || river.vertices.length < 2) continue;
+
+    // Draw river as series of segments with varying width
+    for (let i = 0; i < river.vertices.length - 1; i++) {
+      const v0 = river.vertices[i];
+      const v1 = river.vertices[i + 1];
+
+      const p0 = worldToCanvas(v0.x, v0.z);
+      const p1 = worldToCanvas(v1.x, v1.z);
+
+      // Width in canvas pixels
+      const width0 = Math.max(1, v0.width * state.view.zoom);
+      const width1 = Math.max(1, v1.width * state.view.zoom);
+      const avgWidth = (width0 + width1) / 2;
+
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+
+      // River color - lighter for wider rivers
+      const alpha = Math.min(0.9, 0.5 + avgWidth / 20);
+      ctx.strokeStyle = `rgba(64, 164, 223, ${alpha})`;
+      ctx.lineWidth = avgWidth;
+      ctx.stroke();
+    }
+  }
+}
+
+/**
+ * Draw lakes as filled polygons
+ */
+function drawLakes() {
+  const lakes = state.hydrology.lakes;
+  if (!lakes || lakes.length === 0) return;
+
+  for (const lake of lakes) {
+    if (!lake.boundary || lake.boundary.length < 3) {
+      // Fallback: draw as circle if no boundary
+      const p = worldToCanvas(lake.x, lake.z);
+      const radius = Math.sqrt(lake.area) * state.view.zoom * 0.5;
+
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, Math.max(5, radius), 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(64, 164, 223, 0.6)';
+      ctx.fill();
+      ctx.strokeStyle = '#40a4df';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      continue;
+    }
+
+    // Draw boundary polygon
+    ctx.beginPath();
+    const first = worldToCanvas(lake.boundary[0].x, lake.boundary[0].z);
+    ctx.moveTo(first.x, first.y);
+
+    for (let i = 1; i < lake.boundary.length; i++) {
+      const p = worldToCanvas(lake.boundary[i].x, lake.boundary[i].z);
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+
+    // Fill and stroke
+    ctx.fillStyle = lake === state.selectedLake
+      ? 'rgba(233, 69, 96, 0.4)'
+      : 'rgba(64, 164, 223, 0.6)';
+    ctx.fill();
+
+    ctx.strokeStyle = lake === state.selectedLake ? '#e94560' : '#40a4df';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Draw endorheic indicator
+    if (lake.endorheic) {
+      const center = worldToCanvas(lake.x, lake.z);
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('(endorheic)', center.x, center.y);
+    }
+  }
+}
+
+/**
+ * Draw water sources as markers
+ */
+function drawWaterSources() {
+  if (!state.hydrology.showWaterSources) return;
+
+  const sources = state.hydrology.waterSources;
+  if (!sources || sources.length === 0) return;
+
+  for (const source of sources) {
+    const p = worldToCanvas(source.x, source.z);
+
+    // Draw marker
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+
+    if (source === state.selectedSource) {
+      ctx.fillStyle = '#e94560';
+    } else if (source.origin === 'manual') {
+      ctx.fillStyle = '#40a4df';
+    } else {
+      ctx.fillStyle = 'rgba(64, 164, 223, 0.6)';
+    }
+    ctx.fill();
+
+    ctx.strokeStyle = source.enabled ? '#fff' : '#888';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Flow rate indicator
+    if (state.currentTab === 'hydrology') {
+      ctx.fillStyle = '#fff';
+      ctx.font = '10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(source.flowRate.toFixed(2), p.x, p.y - 12);
+    }
+  }
+}
+
+/**
+ * Draw flow grid debug overlay
+ */
+function drawFlowGrid() {
+  if (!state.hydrology.showFlowGrid) return;
+
+  const grid = state.hydrology.flowGrid;
+  if (!grid) return;
+
+  const cellSize = grid.resolution * state.view.zoom;
+  if (cellSize < 2) return; // Too small to render
+
+  // Draw flow accumulation as heat map
+  let maxAccum = 1;
+  for (let i = 0; i < grid.accumulation.length; i++) {
+    maxAccum = Math.max(maxAccum, grid.accumulation[i]);
+  }
+
+  for (let cellZ = 0; cellZ < grid.height; cellZ++) {
+    for (let cellX = 0; cellX < grid.width; cellX++) {
+      const idx = cellZ * grid.width + cellX;
+      const accum = grid.accumulation[idx];
+
+      if (accum <= 1) continue; // Skip cells with minimal flow
+
+      const worldX = grid.bounds.minX + (cellX + 0.5) * grid.resolution;
+      const worldZ = grid.bounds.minZ + (cellZ + 0.5) * grid.resolution;
+      const p = worldToCanvas(worldX, worldZ);
+
+      const intensity = Math.log(accum) / Math.log(maxAccum);
+      const alpha = Math.min(0.8, intensity * 0.5);
+
+      ctx.fillStyle = `rgba(64, 164, 223, ${alpha})`;
+      ctx.fillRect(p.x - cellSize / 2, p.y - cellSize / 2, cellSize, cellSize);
+    }
+  }
+}
+
+// =============================================================================
 // Interaction
 // =============================================================================
 
@@ -975,6 +1283,27 @@ function onMouseDown(e) {
       }
     }
     render();
+  } else if (state.currentTool === 'add-source') {
+    // Add manual water source at click location
+    const source = createManualSource(world.x, world.z, {
+      id: `source_manual_${Date.now()}`,
+      flowRate: 0.5
+    });
+    state.hydrology.waterSources.push(source);
+    state.selectedSource = source;
+    // Automatically run simulation when adding a source
+    runHydrologySimulation();
+  } else if (state.currentTool === 'add-lake') {
+    // Add manual lake at click location
+    const lake = createManualLake(world.x, world.z, {
+      id: `lake_manual_${Date.now()}`,
+      waterLevel: 0.15,
+      area: 0.01
+    });
+    state.hydrology.lakes.push(lake);
+    state.selectedLake = lake;
+    // Automatically run simulation when adding a lake
+    runHydrologySimulation();
   }
 }
 
@@ -1268,6 +1597,8 @@ document.querySelectorAll('.tab').forEach(tab => {
 function updateTabUI() {
   const noiseSettings = document.getElementById('noise-settings');
   const halfCellNoiseProps = document.getElementById('halfcell-noise-props');
+  const hydrologySettings = document.getElementById('hydrology-settings');
+  const hydrologyTools = document.querySelectorAll('.hydrology-tool');
 
   if (state.currentTab === 'noise') {
     // Show noise panel
@@ -1288,6 +1619,22 @@ function updateTabUI() {
   // Show/hide per-cell noise controls based on tab
   if (halfCellNoiseProps) {
     halfCellNoiseProps.style.display = (state.currentTab === 'noise') ? 'block' : 'none';
+  }
+
+  // Show/hide hydrology panel and tools
+  if (hydrologySettings) {
+    hydrologySettings.style.display = (state.currentTab === 'hydrology') ? 'block' : 'none';
+  }
+
+  // Show/hide hydrology tools
+  hydrologyTools.forEach(tool => {
+    tool.style.display = (state.currentTab === 'hydrology') ? 'inline-flex' : 'none';
+  });
+
+  // Clear hydrology selection when leaving Tab 3
+  if (state.currentTab !== 'hydrology') {
+    state.selectedSource = null;
+    state.selectedLake = null;
   }
 }
 
@@ -1460,6 +1807,89 @@ document.getElementById('reset-cell-noise').addEventListener('click', () => {
     document.getElementById('prop-cell-feature-scale-value').textContent = defaults.featureScale.toFixed(2);
     render();
   }
+});
+
+// =============================================================================
+// Hydrology Panel Controls (Tab 3)
+// =============================================================================
+
+document.getElementById('multiridge-enabled')?.addEventListener('change', (e) => {
+  state.hydrology.config.multiridge = e.target.checked;
+  state.hydrology.cacheKey = null; // Force regeneration
+  render();
+});
+
+document.getElementById('auto-detect-sources')?.addEventListener('change', (e) => {
+  state.hydrology.config.autoDetect = e.target.checked;
+  state.hydrology.cacheKey = null;
+  render();
+});
+
+document.getElementById('river-carving')?.addEventListener('change', (e) => {
+  state.hydrology.config.carveEnabled = e.target.checked;
+  state.hydrology.cacheKey = null;
+  render();
+});
+
+document.getElementById('river-threshold')?.addEventListener('input', (e) => {
+  const value = parseInt(e.target.value);
+  state.hydrology.config.riverThreshold = value;
+  document.getElementById('river-threshold-value').textContent = value;
+  state.hydrology.cacheKey = null;
+  render();
+});
+
+document.getElementById('river-width-scale')?.addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value);
+  state.hydrology.config.riverWidthScale = value;
+  document.getElementById('river-width-scale-value').textContent = value.toFixed(2);
+  state.hydrology.cacheKey = null;
+  render();
+});
+
+document.getElementById('carve-factor')?.addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value);
+  state.hydrology.config.carveFactor = value;
+  document.getElementById('carve-factor-value').textContent = value.toFixed(3);
+  state.hydrology.cacheKey = null;
+  render();
+});
+
+document.getElementById('show-flow-grid')?.addEventListener('change', (e) => {
+  state.hydrology.showFlowGrid = e.target.checked;
+  render();
+});
+
+document.getElementById('show-watersheds')?.addEventListener('change', (e) => {
+  state.hydrology.showWatersheds = e.target.checked;
+  render();
+});
+
+document.getElementById('show-water-sources')?.addEventListener('change', (e) => {
+  state.hydrology.showWaterSources = e.target.checked;
+  render();
+});
+
+document.getElementById('simulate-water')?.addEventListener('click', () => {
+  // Force regeneration of hydrology
+  runHydrologySimulation();
+});
+
+// Hydrology tool handlers
+document.getElementById('tool-add-source')?.addEventListener('click', () => {
+  document.querySelector('.tool.active')?.classList.remove('active');
+  document.getElementById('tool-add-source').classList.add('active');
+  state.currentTool = 'add-source';
+  canvas.style.cursor = 'crosshair';
+  render();
+});
+
+document.getElementById('tool-add-lake')?.addEventListener('click', () => {
+  document.querySelector('.tool.active')?.classList.remove('active');
+  document.getElementById('tool-add-lake').classList.add('active');
+  state.currentTool = 'add-lake';
+  canvas.style.cursor = 'crosshair';
+  render();
 });
 
 // Property panel controls

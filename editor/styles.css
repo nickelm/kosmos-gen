@@ -295,3 +295,92 @@ body {
   color: #fff;
   margin-left: 8px;
 }
+
+/* Hydrology settings panel */
+#hydrology-settings h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: #888;
+  margin: 16px 0 12px 0;
+}
+
+#hydrology-settings h3:first-child {
+  margin-top: 0;
+}
+
+#hydrology-settings label {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #aaa;
+}
+
+#hydrology-settings input[type="range"] {
+  width: 100%;
+  margin-top: 6px;
+}
+
+#hydrology-settings span {
+  float: right;
+  color: #40a4df;
+  font-weight: bold;
+}
+
+/* Water source properties */
+#source-props h3,
+#lake-props h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: #40a4df;
+  margin-bottom: 12px;
+}
+
+#source-props label,
+#lake-props label {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #aaa;
+}
+
+#source-props input[type="range"],
+#lake-props input[type="range"] {
+  width: 100%;
+  margin-top: 6px;
+}
+
+#source-props span,
+#lake-props span {
+  float: right;
+  color: #40a4df;
+  font-weight: bold;
+}
+
+#lake-type-label {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 12px;
+}
+
+#lake-type-label span {
+  color: #40a4df;
+  float: none;
+}
+
+/* Danger button style */
+.prop-button.danger {
+  background: #4a1a1a;
+  border-color: #6a2a2a;
+  color: #cc8888;
+}
+
+.prop-button.danger:hover {
+  background: #5a2a2a;
+  color: #ffaaaa;
+}
+
+/* Hydrology tool button water color when active */
+.tool.hydrology-tool.active {
+  background: #40a4df;
+  border-color: #40a4df;
+}

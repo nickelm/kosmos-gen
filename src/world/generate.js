@@ -5,6 +5,7 @@
 import { World } from './world.js';
 import { computeVoronoi } from '../geometry/voronoi.js';
 import { deriveSeed } from '../core/seeds.js';
+import { generateHydrology } from '../terrain/hydrology.js';
 
 /**
  * Generate a world from template and seed
@@ -41,9 +42,30 @@ export async function generateWorld(template, seed, options = {}) {
   
   // Phase 5: Hydrology
   onProgress('hydrology', 0);
-  // TODO: Simulate rivers
-  const rivers = [];
-  const lakes = [];
+
+  // Create a temporary world object for hydrology generation
+  const tempWorld = {
+    seed,
+    template,
+    voronoi,
+    halfCells: template.halfCells || {},
+    defaults: template.defaults || {},
+    hydrologyConfig: template.hydrologyConfig || {},
+    waterSources: template.waterSources || [],
+    lakes: template.lakes?.filter(l => l.origin === 'manual') || [],
+    rivers: []
+  };
+
+  // Generate hydrology (rivers, lakes, water sources)
+  const hydrologyResult = generateHydrology(tempWorld, {
+    bounds: { minX: -1, maxX: 1, minZ: -1, maxZ: 1 }
+  });
+
+  const rivers = hydrologyResult.rivers;
+  const lakes = hydrologyResult.lakes;
+  const waterSources = hydrologyResult.waterSources;
+  const flowGrid = hydrologyResult.flowGrid;
+
   onProgress('hydrology', 100);
   
   // Phase 6: Climate
@@ -76,6 +98,9 @@ export async function generateWorld(template, seed, options = {}) {
     halfCells: template.halfCells || {},
     rivers,
     lakes,
+    waterSources,
+    flowGrid,
+    hydrologyConfig: template.hydrologyConfig || {},
     zones
   });
   
