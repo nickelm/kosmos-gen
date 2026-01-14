@@ -10,7 +10,7 @@
   <div id="app">
     <nav id="tabs">
       <button class="tab active" data-tab="spines">1. Spines</button>
-      <button class="tab" data-tab="noise" disabled>2. Noise</button>
+      <button class="tab" data-tab="noise">2. Noise</button>
       <button class="tab" data-tab="hydrology" disabled>3. Hydrology</button>
       <button class="tab" data-tab="climate" disabled>4. Climate</button>
       <button class="tab" data-tab="zones" disabled>5. Zones</button>
@@ -52,7 +52,53 @@
               <input type="range" id="prop-falloff" min="0" max="1" step="0.1" value="0.5">
               <span id="prop-falloff-value">0.50</span>
             </label>
+            <!-- Per-cell noise overrides (shown in Tab 2) -->
+            <div id="halfcell-noise-props" style="display: none;">
+              <hr class="prop-divider">
+              <label>
+                Roughness:
+                <input type="range" id="prop-cell-roughness" min="0" max="1" step="0.05" value="0.3">
+                <span id="prop-cell-roughness-value">0.30</span>
+              </label>
+              <label>
+                Feature Scale:
+                <input type="range" id="prop-cell-feature-scale" min="0.05" max="0.5" step="0.05" value="0.2">
+                <span id="prop-cell-feature-scale-value">0.20</span>
+              </label>
+              <button id="reset-cell-noise" class="prop-button">Reset to Default</button>
+            </div>
           </div>
+        </div>
+
+        <!-- Global Noise Settings (Tab 2 only) -->
+        <div id="noise-settings" style="display: none;">
+          <h3>Domain Warp</h3>
+          <label class="toggle-label">
+            <input type="checkbox" id="warp-enabled" checked>
+            Enable Warp
+          </label>
+          <label>
+            Warp Strength:
+            <input type="range" id="warp-strength" min="0" max="0.15" step="0.005" value="0.05">
+            <span id="warp-strength-value">0.05</span>
+          </label>
+          <label>
+            Warp Scale:
+            <input type="range" id="warp-scale" min="0.005" max="0.05" step="0.005" value="0.015">
+            <span id="warp-scale-value">0.015</span>
+          </label>
+
+          <h3>Default Cell Noise</h3>
+          <label>
+            Roughness:
+            <input type="range" id="default-roughness" min="0" max="1" step="0.05" value="0.3">
+            <span id="default-roughness-value">0.30</span>
+          </label>
+          <label>
+            Feature Scale:
+            <input type="range" id="default-feature-scale" min="0.05" max="0.5" step="0.05" value="0.2">
+            <span id="default-feature-scale-value">0.20</span>
+          </label>
         </div>
       </aside>
     </main>
@@ -76,6 +122,7 @@
       <div id="view-controls">
         <label><input type="checkbox" id="show-elevation" checked> Elevation</label>
         <label><input type="checkbox" id="show-contours"> Contours</label>
+        <label id="noise-view-toggle" style="display: none;"><input type="checkbox" id="show-noisy" checked> Noisy</label>
         <label>Seed: <input type="number" id="seed" value="42"></label>
         <button id="randomize">🎲</button>
       </div>

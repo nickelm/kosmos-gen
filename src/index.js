@@ -6,6 +6,8 @@
 
 // Core
 export { seededRandom, deriveSeed } from './core/seeds.js';
+export { createSimplexNoise, createFBmNoise, unipolar } from './core/noise.js';
+export { createDomainWarp, createCachedDomainWarp, DEFAULT_WARP_CONFIG } from './core/warp.js';
 
 // Geometry
 export {
@@ -27,8 +29,13 @@ export {
 } from './geometry/polygon.js';
 
 // Terrain
-export { createSpine, getHalfCells } from './terrain/spine.js';
+export { createSpine, getHalfCells, getHalfCellConfig } from './terrain/spine.js';
 export { sampleElevation, computeProfileElevation, getProfileShape } from './terrain/elevation.js';
+export {
+  sampleSurfaceNoise,
+  getHalfCellNoiseConfig,
+  DEFAULT_SURFACE_NOISE_CONFIG
+} from './terrain/surfacenoise.js';
 
 // World
 export { World } from './world/world.js';

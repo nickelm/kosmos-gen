@@ -81,6 +81,13 @@ export function getHalfCellId(spineId, vertexIndex, side) {
 }
 
 /**
+ * Default surface noise configuration
+ * Duplicated here to avoid circular imports with surfacenoise.js
+ */
+const DEFAULT_NOISE_ROUGHNESS = 0.3;
+const DEFAULT_NOISE_FEATURE_SCALE = 0.1;
+
+/**
  * Get merged configuration for a half-cell
  *
  * Half-cell config can specify elevation profile in two ways:
@@ -89,16 +96,21 @@ export function getHalfCellId(spineId, vertexIndex, side) {
  *
  * If shape is provided, it takes precedence over profile name.
  *
+ * Noise parameters control surface detail:
+ * - roughness: Noise amplitude (0-1, maps to ~10% of elevation range)
+ * - featureScale: Wavelength of noise features in world units
+ *
  * @param {Object} world - World object with halfCells and defaults
  * @param {string} spineId - Spine identifier
  * @param {number} vertexIndex - Vertex index
  * @param {'left' | 'right' | 'radial'} side - Side of spine
- * @returns {{profile: string|number, baseElevation: number, falloffCurve: number}}
+ * @returns {{profile: string|number, baseElevation: number, falloffCurve: number, roughness: number, featureScale: number}}
  */
 export function getHalfCellConfig(world, spineId, vertexIndex, side) {
   const id = getHalfCellId(spineId, vertexIndex, side);
   const cellOverride = world.halfCells?.[id] || {};
   const defaults = world.defaults || {};
+  const noiseDefaults = defaults.surfaceNoise || {};
 
   // Shape takes precedence if specified, otherwise use profile name
   const profile = cellOverride.shape ?? cellOverride.profile ?? defaults.shape ?? defaults.profile ?? 'ramp';
@@ -106,6 +118,8 @@ export function getHalfCellConfig(world, spineId, vertexIndex, side) {
   return {
     profile,
     baseElevation: cellOverride.baseElevation ?? defaults.baseElevation ?? 0.1,
-    falloffCurve: cellOverride.falloffCurve ?? defaults.falloffCurve ?? 0.5
+    falloffCurve: cellOverride.falloffCurve ?? defaults.falloffCurve ?? 0.5,
+    roughness: cellOverride.roughness ?? noiseDefaults.roughness ?? DEFAULT_NOISE_ROUGHNESS,
+    featureScale: cellOverride.featureScale ?? noiseDefaults.featureScale ?? DEFAULT_NOISE_FEATURE_SCALE
   };
 }

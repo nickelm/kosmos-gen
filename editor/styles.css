@@ -217,3 +217,81 @@ body {
 #randomize:hover {
   background: #1a3a6e;
 }
+
+/* Noise settings panel */
+#noise-settings h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: #888;
+  margin: 16px 0 12px 0;
+}
+
+#noise-settings h3:first-child {
+  margin-top: 0;
+}
+
+#noise-settings label {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #aaa;
+}
+
+#noise-settings input[type="range"] {
+  width: 100%;
+  margin-top: 6px;
+}
+
+#noise-settings span {
+  float: right;
+  color: #4a9fff;
+  font-weight: bold;
+}
+
+.toggle-label {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+}
+
+.toggle-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+/* Property divider */
+.prop-divider {
+  border: none;
+  border-top: 1px solid #0f3460;
+  margin: 16px 0;
+}
+
+/* Property button */
+.prop-button {
+  width: 100%;
+  padding: 8px 12px;
+  background: #0f3460;
+  border: 1px solid #1a1a4e;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 12px;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.prop-button:hover {
+  background: #1a3a6e;
+  color: #fff;
+}
+
+/* Cell override indicator */
+.cell-override-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  background: #e94560;
+  border-radius: 3px;
+  font-size: 10px;
+  color: #fff;
+  margin-left: 8px;
+}

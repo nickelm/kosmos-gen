@@ -3,9 +3,17 @@
  */
 
 import { getSide, getHalfCellConfig } from './spine.js';
+import { createDomainWarp, DEFAULT_WARP_CONFIG } from '../core/warp.js';
+import { sampleSurfaceNoise, DEFAULT_SURFACE_NOISE_CONFIG } from './surfacenoise.js';
 
 /** Default blend width as fraction of influence radius */
 const DEFAULT_BLEND_WIDTH = 0.15;
+
+/**
+ * Cache for domain warp functions, keyed by world seed
+ * Uses WeakMap with world object as key to auto-cleanup
+ */
+const warpCache = new WeakMap();
 
 /**
  * Compute distance from a point to a line segment (clamped)
@@ -125,14 +133,46 @@ function smoothstep(t) {
 }
 
 /**
+ * Get or create a domain warp function for a world
+ * Caches the warp function to avoid recreating it on every sample
+ *
+ * @param {Object} world - World object
+ * @returns {(x: number, z: number) => [number, number]} Warp function
+ */
+function getWarpFunction(world) {
+  // Check cache first
+  if (warpCache.has(world)) {
+    return warpCache.get(world);
+  }
+
+  // Get warp config from world defaults
+  const warpConfig = world.defaults?.warp ?? DEFAULT_WARP_CONFIG;
+  const seed = world.seed ?? 42;
+
+  // Create warp function
+  const warp = createDomainWarp(seed, warpConfig);
+
+  // Cache it
+  warpCache.set(world, warp);
+
+  return warp;
+}
+
+/**
  * Sample elevation at a world position with smooth blending
+ *
+ * Domain warping is applied first to distort the coordinate space,
+ * making geometric features (ridges, coastlines) appear organic.
  *
  * @param {Object} world - Generated world data
  * @param {number} x - World X coordinate
  * @param {number} z - World Z coordinate
+ * @param {Object} options - Sampling options
+ * @param {boolean} [options.includeNoise=true] - Whether to add surface noise
  * @returns {number} Elevation in [0, 1]
  */
-export function sampleElevation(world, x, z) {
+export function sampleElevation(world, x, z, options = {}) {
+  const { includeNoise = true } = options;
   const spines = world.template?.spines;
   const baseElevation = world.defaults?.baseElevation ?? 0.1;
   const blendWidth = world.defaults?.blendWidth ?? DEFAULT_BLEND_WIDTH;
@@ -142,7 +182,12 @@ export function sampleElevation(world, x, z) {
     return baseElevation;
   }
 
-  // Collect contributions from all spines
+  // Apply domain warping to coordinates
+  // This distorts the geometric profiles into organic shapes
+  const warp = getWarpFunction(world);
+  const [wx, wz] = warp(x, z);
+
+  // Collect contributions from all spines using warped coordinates
   let totalWeight = 0;
   let weightedElevation = 0;
 
@@ -150,7 +195,8 @@ export function sampleElevation(world, x, z) {
     if (!spine.vertices || spine.vertices.length === 0) continue;
 
     // Find closest point on spine and compute elevation contribution
-    const result = getSpineContribution(x, z, spine, world, baseElevation, blendWidth);
+    // Use warped coordinates for organic terrain shapes
+    const result = getSpineContribution(wx, wz, spine, world, baseElevation, blendWidth);
     if (!result) continue;
 
     const { elevation, weight } = result;
@@ -164,7 +210,22 @@ export function sampleElevation(world, x, z) {
     return 0;
   }
 
-  return weightedElevation / totalWeight;
+  let elevation = weightedElevation / totalWeight;
+
+  // Add surface noise for terrain variation
+  // Noise is applied to both land and seafloor uniformly
+  // Islands emerge where seafloor + noise > sea level
+  if (includeNoise) {
+    const noiseConfig = world.defaults?.surfaceNoise ?? DEFAULT_SURFACE_NOISE_CONFIG;
+    if (noiseConfig.enabled !== false) {
+      const noiseDeviation = sampleSurfaceNoise(world, x, z, elevation);
+      elevation += noiseDeviation;
+      // Clamp to valid range
+      elevation = Math.max(0, Math.min(1, elevation));
+    }
+  }
+
+  return elevation;
 }
 
 /**

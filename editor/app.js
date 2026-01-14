@@ -14,6 +14,8 @@ import { sampleElevation } from '../src/terrain/elevation.js';
 import { findHalfCellAt, extractHalfCellBoundary, clearHalfCellCache, computeHalfCellPolygons } from '../src/geometry/voronoi.js';
 import { getSide, getHalfCellId, getHalfCellConfig, getHalfCells } from '../src/terrain/spine.js';
 import { extractContours, simplifyPolyline } from '../src/geometry/contour.js';
+import { createFBmNoise, unipolar } from '../src/core/noise.js';
+import { deriveSeed } from '../src/core/seeds.js';
 
 // =============================================================================
 // State
@@ -33,7 +35,13 @@ const state = {
       profile: 'ramp',
       baseElevation: 0,  // Profile slopes to sea floor; coastline is at SEA_LEVEL (0.1)
       falloffCurve: 0.5,
-      noise: { roughness: 0.3, featureScale: 0.2 }
+      noise: { roughness: 0.3, featureScale: 0.2 },
+      warp: {
+        enabled: false,   // Disabled in Phase 1 (Spines) - enable in Phase 2 (Noise)
+        strength: 0.05,   // Maximum displacement in normalized units
+        scale: 0.015,     // Noise frequency (lower = larger features)
+        octaves: 2
+      }
     },
     climate: {},
     zones: [],
@@ -65,6 +73,7 @@ const state = {
   // Display options
   showElevation: true,
   showElevationContours: false,
+  showNoisy: true,  // Tab 2: show noisy elevation (vs clean)
 
   // Contour cache (invalidated when spines/profiles change)
   cache: {
@@ -158,11 +167,88 @@ function buildWorld() {
   }
 
   return {
+    seed: state.seed,
     voronoi: { seeds },
     template: { spines: state.template.spines },
     halfCells: state.template.halfCells,
     defaults: state.template.defaults
   };
+}
+
+// =============================================================================
+// Noise Sampling (Tab 2)
+// =============================================================================
+
+/**
+ * Cache for terrain noise generator, keyed by seed + config hash
+ */
+let noiseCache = {
+  cacheKey: null,
+  noiseFn: null
+};
+
+/**
+ * Get or create a terrain noise function
+ * @param {Object} world - World object with seed and noise config
+ * @returns {(x: number, z: number) => number} Noise function returning [0, 1]
+ */
+function getTerrainNoise(world) {
+  const noiseConfig = world.defaults?.noise ?? { roughness: 0.3, featureScale: 0.2 };
+  const cacheKey = `${world.seed}|${noiseConfig.roughness}|${noiseConfig.featureScale}`;
+
+  if (noiseCache.cacheKey !== cacheKey) {
+    // Create new noise function
+    const noiseSeed = deriveSeed(world.seed, 'terrainNoise');
+    const baseFn = createFBmNoise(noiseSeed, {
+      octaves: 4,
+      persistence: 0.5,
+      lacunarity: 2.0,
+      frequency: 1 / noiseConfig.featureScale
+    });
+    noiseCache.noiseFn = unipolar(baseFn);
+    noiseCache.cacheKey = cacheKey;
+  }
+
+  return noiseCache.noiseFn;
+}
+
+/**
+ * Sample elevation with optional terrain noise applied
+ * @param {Object} world - World object
+ * @param {number} x - World X coordinate
+ * @param {number} z - World Z coordinate
+ * @param {boolean} applyNoise - Whether to apply terrain noise
+ * @returns {number} Elevation in [0, 1]
+ */
+function sampleElevationWithNoise(world, x, z, applyNoise) {
+  const baseElevation = sampleElevation(world, x, z);
+
+  if (!applyNoise || baseElevation <= 0) {
+    return baseElevation;
+  }
+
+  const noiseConfig = world.defaults?.noise ?? { roughness: 0.3, featureScale: 0.2 };
+  const noiseFn = getTerrainNoise(world);
+
+  // Sample noise at this position
+  const noiseValue = noiseFn(x, z);
+
+  // Scale noise by roughness - noise adds detail on top of base terrain
+  // Only apply noise above sea level, scale by distance from sea level
+  const seaLevel = 0.1;
+  if (baseElevation <= seaLevel) {
+    return baseElevation;
+  }
+
+  // Noise amplitude scales with roughness and land height
+  const landHeight = baseElevation - seaLevel;
+  const amplitude = noiseConfig.roughness * 0.15; // Max 15% elevation variation
+
+  // Apply noise centered on base elevation
+  const noisyElevation = baseElevation + (noiseValue - 0.5) * 2 * amplitude * landHeight;
+
+  // Clamp to valid range, ensuring we don't go below sea level
+  return Math.max(seaLevel, Math.min(1, noisyElevation));
 }
 
 /**
@@ -310,11 +396,16 @@ function drawLandElevation() {
   const world = buildWorld();
   const step = 4; // Sample every 4 pixels
 
+  // In Tab 2 (noise), apply noise to elevation if toggle is on
+  const applyNoise = state.currentTab === 'noise' && state.showNoisy;
+
   for (let cy = 0; cy < canvas.height; cy += step) {
     for (let cx = 0; cx < canvas.width; cx += step) {
       const { x, z } = canvasToWorld(cx, cy);
 
-      const elevation = sampleElevation(world, x, z);
+      const elevation = applyNoise
+        ? sampleElevationWithNoise(world, x, z, true)
+        : sampleElevation(world, x, z);
 
       // Skip deep ocean (elevation = 0) - ocean fill shows through
       if (elevation <= 0) continue;
@@ -1126,9 +1217,39 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelector('.tab.active').classList.remove('active');
     tab.classList.add('active');
     state.currentTab = tab.dataset.tab;
+    updateTabUI();
     render();
   });
 });
+
+/**
+ * Update UI elements based on current tab
+ */
+function updateTabUI() {
+  const noiseSettings = document.getElementById('noise-settings');
+  const noiseViewToggle = document.getElementById('noise-view-toggle');
+  const halfCellNoiseProps = document.getElementById('halfcell-noise-props');
+
+  if (state.currentTab === 'noise') {
+    // Show noise panel and toggle
+    noiseSettings.style.display = 'block';
+    noiseViewToggle.style.display = 'inline';
+    // Enable warp for Tab 2
+    if (!state.template.defaults.warp.enabled) {
+      state.template.defaults.warp.enabled = true;
+      document.getElementById('warp-enabled').checked = true;
+    }
+  } else {
+    // Hide noise panel and toggle
+    noiseSettings.style.display = 'none';
+    noiseViewToggle.style.display = 'none';
+  }
+
+  // Show/hide per-cell noise controls based on tab
+  if (halfCellNoiseProps) {
+    halfCellNoiseProps.style.display = (state.currentTab === 'noise') ? 'block' : 'none';
+  }
+}
 
 document.querySelectorAll('.tool').forEach(tool => {
   tool.addEventListener('click', () => {
@@ -1194,6 +1315,106 @@ document.getElementById('show-contours').addEventListener('change', (e) => {
   render();
 });
 
+// Noisy toggle (Tab 2)
+document.getElementById('show-noisy').addEventListener('change', (e) => {
+  state.showNoisy = e.target.checked;
+  render();
+});
+
+// =============================================================================
+// Noise Panel Controls (Tab 2)
+// =============================================================================
+
+// Domain warp controls
+document.getElementById('warp-enabled').addEventListener('change', (e) => {
+  state.template.defaults.warp.enabled = e.target.checked;
+  // Invalidate caches when warp changes
+  noiseCache.cacheKey = null;
+  render();
+});
+
+document.getElementById('warp-strength').addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value);
+  state.template.defaults.warp.strength = value;
+  document.getElementById('warp-strength-value').textContent = value.toFixed(3);
+  noiseCache.cacheKey = null;
+  render();
+});
+
+document.getElementById('warp-scale').addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value);
+  state.template.defaults.warp.scale = value;
+  document.getElementById('warp-scale-value').textContent = value.toFixed(3);
+  noiseCache.cacheKey = null;
+  render();
+});
+
+// Default noise controls
+document.getElementById('default-roughness').addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value);
+  state.template.defaults.noise.roughness = value;
+  document.getElementById('default-roughness-value').textContent = value.toFixed(2);
+  noiseCache.cacheKey = null;
+  render();
+});
+
+document.getElementById('default-feature-scale').addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value);
+  state.template.defaults.noise.featureScale = value;
+  document.getElementById('default-feature-scale-value').textContent = value.toFixed(2);
+  noiseCache.cacheKey = null;
+  render();
+});
+
+// Per-cell noise controls
+document.getElementById('prop-cell-roughness').addEventListener('input', (e) => {
+  if (!state.selectedHalfCell) return;
+  const { spineId, vertexIndex, side } = state.selectedHalfCell;
+  const id = getHalfCellId(spineId, vertexIndex, side);
+  if (!state.template.halfCells[id]) {
+    state.template.halfCells[id] = {};
+  }
+  if (!state.template.halfCells[id].noise) {
+    state.template.halfCells[id].noise = {};
+  }
+  const value = parseFloat(e.target.value);
+  state.template.halfCells[id].noise.roughness = value;
+  document.getElementById('prop-cell-roughness-value').textContent = value.toFixed(2);
+  render();
+});
+
+document.getElementById('prop-cell-feature-scale').addEventListener('input', (e) => {
+  if (!state.selectedHalfCell) return;
+  const { spineId, vertexIndex, side } = state.selectedHalfCell;
+  const id = getHalfCellId(spineId, vertexIndex, side);
+  if (!state.template.halfCells[id]) {
+    state.template.halfCells[id] = {};
+  }
+  if (!state.template.halfCells[id].noise) {
+    state.template.halfCells[id].noise = {};
+  }
+  const value = parseFloat(e.target.value);
+  state.template.halfCells[id].noise.featureScale = value;
+  document.getElementById('prop-cell-feature-scale-value').textContent = value.toFixed(2);
+  render();
+});
+
+document.getElementById('reset-cell-noise').addEventListener('click', () => {
+  if (!state.selectedHalfCell) return;
+  const { spineId, vertexIndex, side } = state.selectedHalfCell;
+  const id = getHalfCellId(spineId, vertexIndex, side);
+  if (state.template.halfCells[id]?.noise) {
+    delete state.template.halfCells[id].noise;
+    // Update UI to show defaults
+    const defaults = state.template.defaults.noise;
+    document.getElementById('prop-cell-roughness').value = defaults.roughness;
+    document.getElementById('prop-cell-roughness-value').textContent = defaults.roughness.toFixed(2);
+    document.getElementById('prop-cell-feature-scale').value = defaults.featureScale;
+    document.getElementById('prop-cell-feature-scale-value').textContent = defaults.featureScale.toFixed(2);
+    render();
+  }
+});
+
 // Property panel controls
 const propElevation = document.getElementById('prop-elevation');
 const propInfluence = document.getElementById('prop-influence');
@@ -1254,6 +1475,7 @@ function updatePropertiesPanel() {
   const noSelection = document.getElementById('no-selection');
   const vertexProps = document.getElementById('vertex-props');
   const halfCellProps = document.getElementById('halfcell-props');
+  const halfCellNoiseProps = document.getElementById('halfcell-noise-props');
 
   if (state.selectedSpine && state.selectedVertex !== null) {
     // Show vertex properties
@@ -1278,6 +1500,21 @@ function updatePropertiesPanel() {
     document.getElementById('prop-profile').value = config.profile;
     document.getElementById('prop-falloff').value = config.falloffCurve;
     document.getElementById('prop-falloff-value').textContent = config.falloffCurve.toFixed(2);
+
+    // Update per-cell noise properties if in Tab 2
+    if (halfCellNoiseProps && state.currentTab === 'noise') {
+      halfCellNoiseProps.style.display = 'block';
+      const id = getHalfCellId(spineId, vertexIndex, side);
+      const cellConfig = state.template.halfCells[id];
+      const noiseConfig = cellConfig?.noise ?? state.template.defaults.noise;
+
+      document.getElementById('prop-cell-roughness').value = noiseConfig.roughness;
+      document.getElementById('prop-cell-roughness-value').textContent = noiseConfig.roughness.toFixed(2);
+      document.getElementById('prop-cell-feature-scale').value = noiseConfig.featureScale;
+      document.getElementById('prop-cell-feature-scale-value').textContent = noiseConfig.featureScale.toFixed(2);
+    } else if (halfCellNoiseProps) {
+      halfCellNoiseProps.style.display = 'none';
+    }
   } else {
     // No selection
     noSelection.style.display = 'block';
@@ -1290,5 +1527,26 @@ function updatePropertiesPanel() {
 // Initialize
 // =============================================================================
 
+/**
+ * Sync noise panel UI with current state values
+ */
+function syncNoisePanelUI() {
+  const warp = state.template.defaults.warp;
+  const noise = state.template.defaults.noise;
+
+  document.getElementById('warp-enabled').checked = warp.enabled;
+  document.getElementById('warp-strength').value = warp.strength;
+  document.getElementById('warp-strength-value').textContent = warp.strength.toFixed(3);
+  document.getElementById('warp-scale').value = warp.scale;
+  document.getElementById('warp-scale-value').textContent = warp.scale.toFixed(3);
+
+  document.getElementById('default-roughness').value = noise.roughness;
+  document.getElementById('default-roughness-value').textContent = noise.roughness.toFixed(2);
+  document.getElementById('default-feature-scale').value = noise.featureScale;
+  document.getElementById('default-feature-scale-value').textContent = noise.featureScale.toFixed(2);
+}
+
 resizeCanvas();
+syncNoisePanelUI();
+updateTabUI();
 console.log('kosmos-gen editor initialized');
