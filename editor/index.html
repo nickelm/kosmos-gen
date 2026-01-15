@@ -18,8 +18,18 @@
     </nav>
 
     <main id="workspace">
-      <canvas id="canvas"></canvas>
+      <div id="canvas-container">
+        <canvas id="canvas"></canvas>
+        <canvas id="overlay-canvas"></canvas>
+      </div>
       <aside id="panel">
+        <div class="panel-header">
+          <button id="panel-toggle" class="panel-toggle" aria-label="Toggle properties panel" aria-expanded="true">
+            <svg class="chevron" viewBox="0 0 24 24" width="16" height="16">
+              <path fill="currentColor" d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/>
+            </svg>
+          </button>
+        </div>
         <div id="properties">
           <h3>Properties</h3>
           <div id="no-selection">

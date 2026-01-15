@@ -10,6 +10,8 @@ body {
   color: #eee;
   height: 100vh;
   overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: auto;
 }
 
 #app {
@@ -59,21 +61,98 @@ body {
   min-height: 0; /* Prevent flex overflow */
 }
 
-#canvas {
+/* Canvas container for touch handling */
+#canvas-container {
+  position: relative;
   flex: 1 1 0;
-  min-width: 0; /* Allow canvas to shrink */
+  min-width: 0;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   background: #0a0a1a;
   cursor: crosshair;
-  display: block; /* Remove inline spacing */
+  display: block;
+  touch-action: none;
+}
+
+#overlay-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  display: block;
 }
 
 #panel {
   width: 280px;
-  flex: 0 0 280px; /* Don't grow, don't shrink, basis 280px */
+  flex: 0 0 280px;
   background: #1a2a4a;
   border-left: 2px solid #0f3460;
   padding: 16px;
   overflow-y: auto;
+  transition: transform 0.3s ease, width 0.3s ease, flex-basis 0.3s ease;
+  will-change: transform;
+  position: relative;
+}
+
+/* Panel header with toggle */
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.panel-toggle {
+  display: none;
+  width: 32px;
+  height: 32px;
+  background: #0f3460;
+  border: 1px solid #1a1a4e;
+  border-radius: 4px;
+  color: #ccc;
+  cursor: pointer;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.panel-toggle:hover {
+  background: #1a3a6e;
+  color: #fff;
+}
+
+.panel-toggle .chevron {
+  transition: transform 0.3s ease;
+}
+
+.panel-toggle.panel-collapsed .chevron {
+  transform: rotate(180deg);
+}
+
+/* Collapsed panel state */
+#panel.collapsed {
+  transform: translateX(100%);
+  pointer-events: none;
+}
+
+#panel.collapsed .panel-toggle {
+  pointer-events: auto;
+  position: absolute;
+  left: -44px;
+  top: 16px;
+  transform: translateX(0);
 }
 
 #properties h3 {
@@ -383,4 +462,151 @@ body {
 .tool.hydrology-tool.active {
   background: #40a4df;
   border-color: #40a4df;
+}
+
+/* =============================================================================
+   Responsive / Touch Layout
+   ============================================================================= */
+
+/* Mobile breakpoint at 768px */
+@media (max-width: 768px) {
+  /* Show panel toggle button on mobile */
+  .panel-toggle {
+    display: flex;
+  }
+
+  /* Panel as slide-over on mobile */
+  #panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 280px;
+    z-index: 100;
+    flex: none;
+    padding-top: 60px; /* Space for toggle when collapsed */
+  }
+
+  #panel.collapsed {
+    transform: translateX(100%);
+  }
+
+  /* Backdrop when panel open on mobile */
+  #panel::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 280px;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 1;
+    transition: opacity 0.3s ease;
+    pointer-events: auto;
+  }
+
+  #panel.collapsed::before {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* Adjust workspace for mobile panel */
+  #workspace {
+    position: relative;
+  }
+
+  /* Smaller toolbar buttons on mobile */
+  .tool, .tool-action {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .tool .icon {
+    font-size: 12px;
+  }
+
+  /* Stack toolbar on narrow screens */
+  #toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  #tools {
+    flex-wrap: wrap;
+  }
+
+  #view-controls {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  #view-controls label {
+    font-size: 11px;
+  }
+
+  /* Tabs scrollable on mobile */
+  #tabs {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tab {
+    padding: 10px 16px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+}
+
+/* Extra small screens */
+@media (max-width: 480px) {
+  #panel {
+    width: 100%;
+  }
+
+  #panel::before {
+    right: 0;
+  }
+
+  .tool {
+    padding: 6px 8px;
+  }
+
+  .tool span:not(.icon) {
+    display: none;
+  }
+
+  #view-controls label span {
+    display: none;
+  }
+}
+
+/* Touch-specific cursor states */
+@media (pointer: coarse) {
+  #canvas {
+    cursor: default;
+  }
+
+  .tool, .tool-action, .tab, .prop-button, .panel-toggle {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* High contrast focus states for accessibility */
+.tool:focus-visible,
+.tool-action:focus-visible,
+.tab:focus-visible,
+.panel-toggle:focus-visible {
+  outline: 2px solid #e94560;
+  outline-offset: 2px;
+}
+
+/* Hint text styling */
+.hint {
+  font-size: 11px;
+  color: #666;
+  margin-top: 8px;
+  font-style: italic;
 }
