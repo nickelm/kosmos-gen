@@ -11,7 +11,7 @@
  */
 
 import { sampleElevation, SEA_LEVEL } from '../src/terrain/elevation.js';
-import { createBlob, generateBlobId, PROFILES, PROFILE_NAMES } from '../src/terrain/blob.js';
+import { createBlob, generateBlobId, PROFILES, PROFILE_NAMES, evaluateBlobInfluence } from '../src/terrain/blob.js';
 import { computeBlobCells, findBlobAt, findNearestBlob } from '../src/geometry/voronoi.js';
 import { extractContours, simplifyPolyline } from '../src/geometry/contour.js';
 import { extractCoastline, DEFAULT_COASTLINE_CONFIG } from '../src/terrain/coastline.js';
@@ -55,7 +55,14 @@ const state = {
       seaLevel: SEA_LEVEL,
       profile: 'cone',
       baseElevation: 0,
-      noise: { roughness: 0.3, featureScale: 0.2 },
+      noise: {
+        enabled: true,
+        roughness: 0.3,
+        featureScale: 0.2,
+        octaves: 4,
+        lacunarity: 2.0,
+        persistence: 0.5
+      },
       surfaceNoise: { enabled: true, roughness: 0.3, featureScale: 0.1 },
       ridgeNoise: { enabled: false },
       warp: {
@@ -390,16 +397,25 @@ let noiseCache = {
   noiseFn: null
 };
 
+// Parameterized noise cache for per-blob blended parameters
+const paramNoiseCache = new Map();
+
 function getTerrainNoise(world) {
-  const noiseConfig = world.defaults?.noise ?? { roughness: 0.3, featureScale: 0.2 };
-  const cacheKey = `${world.seed}|${noiseConfig.roughness}|${noiseConfig.featureScale}`;
+  const noiseConfig = world.defaults?.noise ?? {
+    roughness: 0.3,
+    featureScale: 0.2,
+    octaves: 4,
+    lacunarity: 2.0,
+    persistence: 0.5
+  };
+  const cacheKey = `${world.seed}|${noiseConfig.roughness}|${noiseConfig.featureScale}|${noiseConfig.octaves}|${noiseConfig.lacunarity}|${noiseConfig.persistence}`;
 
   if (noiseCache.cacheKey !== cacheKey) {
     const noiseSeed = deriveSeed(world.seed, 'terrainNoise');
     const baseFn = createFBmNoise(noiseSeed, {
-      octaves: 4,
-      persistence: 0.5,
-      lacunarity: 2.0,
+      octaves: noiseConfig.octaves,
+      persistence: noiseConfig.persistence,
+      lacunarity: noiseConfig.lacunarity,
       frequency: 1 / noiseConfig.featureScale
     });
     noiseCache.noiseFn = unipolar(baseFn);
@@ -409,6 +425,46 @@ function getTerrainNoise(world) {
   return noiseCache.noiseFn;
 }
 
+function getTerrainNoiseForParams(seed, params) {
+  const key = `${seed}|${params.featureScale.toFixed(3)}|${params.octaves}|${params.lacunarity}|${params.persistence}`;
+  if (!paramNoiseCache.has(key)) {
+    const fn = createFBmNoise(deriveSeed(seed, 'terrainNoise'), {
+      octaves: params.octaves,
+      persistence: params.persistence,
+      lacunarity: params.lacunarity,
+      frequency: 1 / params.featureScale
+    });
+    paramNoiseCache.set(key, unipolar(fn));
+    // Limit cache size
+    if (paramNoiseCache.size > 50) {
+      paramNoiseCache.delete(paramNoiseCache.keys().next().value);
+    }
+  }
+  return paramNoiseCache.get(key);
+}
+
+function blendNoiseParams(contributions, defaults) {
+  if (contributions.length === 0) return defaults;
+
+  let totalWeight = 0;
+  let roughness = 0;
+  let featureScale = 0;
+
+  for (const c of contributions) {
+    totalWeight += c.weight;
+    roughness += c.weight * (c.roughness ?? defaults.roughness);
+    featureScale += c.weight * (c.featureScale ?? defaults.featureScale);
+  }
+
+  return {
+    roughness: roughness / totalWeight,
+    featureScale: featureScale / totalWeight,
+    octaves: defaults.octaves,
+    lacunarity: defaults.lacunarity,
+    persistence: defaults.persistence
+  };
+}
+
 function sampleElevationWithNoise(world, x, z, applyNoise) {
   const baseElevation = sampleElevation(world, x, z);
 
@@ -416,16 +472,55 @@ function sampleElevationWithNoise(world, x, z, applyNoise) {
     return baseElevation;
   }
 
-  const noiseConfig = world.defaults?.noise ?? { roughness: 0.3, featureScale: 0.2 };
-  const noiseFn = getTerrainNoise(world);
-  const noiseValue = noiseFn(x, z);
-
   if (baseElevation <= SEA_LEVEL) {
     return baseElevation;
   }
 
+  const defaults = world.defaults?.noise ?? {
+    roughness: 0.3,
+    featureScale: 0.2,
+    octaves: 4,
+    lacunarity: 2.0,
+    persistence: 0.5
+  };
+
+  // Check if any blobs have noise overrides
+  const hasOverrides = world.template.blobs.some(b => b.noiseOverride);
+
+  let noiseValue;
+  let blendedRoughness;
+
+  if (hasOverrides) {
+    // Collect noise params from influencing blobs with overrides
+    const contributions = [];
+    for (const blob of world.template.blobs) {
+      const influence = evaluateBlobInfluence(blob, x, z);
+      if (influence && influence.weight > 0) {
+        const params = blob.noiseOverride ?? defaults;
+        contributions.push({
+          weight: influence.weight,
+          roughness: params.roughness,
+          featureScale: params.featureScale
+        });
+      }
+    }
+
+    // Blend noise parameters by weight
+    const blended = blendNoiseParams(contributions, defaults);
+    blendedRoughness = blended.roughness;
+
+    // Sample with blended params
+    const noiseFn = getTerrainNoiseForParams(world.seed, blended);
+    noiseValue = noiseFn(x, z);
+  } else {
+    // No overrides - use global noise function (faster path)
+    const noiseFn = getTerrainNoise(world);
+    noiseValue = noiseFn(x, z);
+    blendedRoughness = defaults.roughness;
+  }
+
   const landHeight = baseElevation - SEA_LEVEL;
-  const amplitude = noiseConfig.roughness * 0.15;
+  const amplitude = blendedRoughness * 0.15;
   const noisyElevation = baseElevation + (noiseValue - 0.5) * 2 * amplitude * landHeight;
 
   return Math.max(SEA_LEVEL, Math.min(1, noisyElevation));
@@ -1138,6 +1233,21 @@ const touchHandler = createInteractionHandler({
   onViewportChange: () => {
     // Viewport changed, just render
   },
+  getCurrentTab: () => state.currentTab,
+  getSelectedBlob: () => state.selectedBlob,
+  getNoiseDefaults: () => state.template.defaults.noise,
+  onNoiseAdjust: ({ blob, roughness, featureScale }) => {
+    // Two-finger noise adjustment on Noise tab
+    if (!blob.noiseOverride) {
+      blob.noiseOverride = {};
+    }
+    blob.noiseOverride.roughness = roughness;
+    blob.noiseOverride.featureScale = featureScale;
+    paramNoiseCache.clear();
+    markElevationDirty();
+    updateNoiseOverrideUI();
+    render();
+  },
   render
 });
 
@@ -1593,6 +1703,36 @@ document.getElementById('default-feature-scale').addEventListener('input', (e) =
   render();
 });
 
+document.getElementById('default-octaves').addEventListener('input', (e) => {
+  const value = parseInt(e.target.value);
+  state.template.defaults.noise.octaves = value;
+  document.getElementById('default-octaves-value').textContent = value;
+  noiseCache.cacheKey = null;
+  paramNoiseCache.clear();
+  markElevationDirty();
+  render();
+});
+
+document.getElementById('default-lacunarity').addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value);
+  state.template.defaults.noise.lacunarity = value;
+  document.getElementById('default-lacunarity-value').textContent = value.toFixed(1);
+  noiseCache.cacheKey = null;
+  paramNoiseCache.clear();
+  markElevationDirty();
+  render();
+});
+
+document.getElementById('default-persistence').addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value);
+  state.template.defaults.noise.persistence = value;
+  document.getElementById('default-persistence-value').textContent = value.toFixed(2);
+  noiseCache.cacheKey = null;
+  paramNoiseCache.clear();
+  markElevationDirty();
+  render();
+});
+
 document.getElementById('micro-detail-enabled').addEventListener('change', (e) => {
   state.template.defaults.microDetail.enabled = e.target.checked;
   markElevationDirty();
@@ -1723,6 +1863,76 @@ propProfile?.addEventListener('change', (e) => {
   }
 });
 
+// Per-blob noise override controls
+document.getElementById('prop-noise-override-enabled')?.addEventListener('change', (e) => {
+  if (state.selectedBlob) {
+    if (e.target.checked) {
+      // Enable override with current global values as defaults
+      const defaults = state.template.defaults.noise;
+      state.selectedBlob.noiseOverride = {
+        roughness: defaults.roughness,
+        featureScale: defaults.featureScale
+      };
+    } else {
+      // Remove override
+      delete state.selectedBlob.noiseOverride;
+    }
+    paramNoiseCache.clear();
+    markElevationDirty();
+    updateNoiseOverrideUI();
+    render();
+  }
+});
+
+document.getElementById('prop-noise-roughness')?.addEventListener('input', (e) => {
+  if (state.selectedBlob && state.selectedBlob.noiseOverride) {
+    const value = parseFloat(e.target.value);
+    state.selectedBlob.noiseOverride.roughness = value;
+    document.getElementById('prop-noise-roughness-value').textContent = value.toFixed(2);
+    paramNoiseCache.clear();
+    markElevationDirty();
+    render();
+  }
+});
+
+document.getElementById('prop-noise-featureScale')?.addEventListener('input', (e) => {
+  if (state.selectedBlob && state.selectedBlob.noiseOverride) {
+    const value = parseFloat(e.target.value);
+    state.selectedBlob.noiseOverride.featureScale = value;
+    document.getElementById('prop-noise-featureScale-value').textContent = value.toFixed(2);
+    paramNoiseCache.clear();
+    markElevationDirty();
+    render();
+  }
+});
+
+function updateNoiseOverrideUI() {
+  const overrideEnabled = document.getElementById('prop-noise-override-enabled');
+  const roughnessSlider = document.getElementById('prop-noise-roughness');
+  const featureScaleSlider = document.getElementById('prop-noise-featureScale');
+  const roughnessValue = document.getElementById('prop-noise-roughness-value');
+  const featureScaleValue = document.getElementById('prop-noise-featureScale-value');
+
+  if (state.selectedBlob && state.selectedBlob.noiseOverride) {
+    overrideEnabled.checked = true;
+    roughnessSlider.value = state.selectedBlob.noiseOverride.roughness;
+    roughnessValue.textContent = state.selectedBlob.noiseOverride.roughness.toFixed(2);
+    featureScaleSlider.value = state.selectedBlob.noiseOverride.featureScale;
+    featureScaleValue.textContent = state.selectedBlob.noiseOverride.featureScale.toFixed(2);
+    roughnessSlider.disabled = false;
+    featureScaleSlider.disabled = false;
+  } else {
+    overrideEnabled.checked = false;
+    const defaults = state.template.defaults.noise;
+    roughnessSlider.value = defaults.roughness;
+    roughnessValue.textContent = defaults.roughness.toFixed(2);
+    featureScaleSlider.value = defaults.featureScale;
+    featureScaleValue.textContent = defaults.featureScale.toFixed(2);
+    roughnessSlider.disabled = true;
+    featureScaleSlider.disabled = true;
+  }
+}
+
 // Tool defaults panel
 document.getElementById('tool-elevation')?.addEventListener('input', (e) => {
   state.toolDefaults.elevation = parseFloat(e.target.value);
@@ -1742,6 +1952,7 @@ function updatePropertiesPanel() {
   const noSelection = document.getElementById('no-selection');
   const blobProps = document.getElementById('blob-props');
   const toolProps = document.getElementById('tool-props');
+  const noiseOverrides = document.getElementById('blob-noise-overrides');
 
   if (state.selectedBlob) {
     noSelection.style.display = 'none';
@@ -1753,10 +1964,19 @@ function updatePropertiesPanel() {
     propRadius.value = state.selectedBlob.radius;
     propRadiusValue.textContent = state.selectedBlob.radius.toFixed(2);
     propProfile.value = state.selectedBlob.profile;
+
+    // Show noise override panel only on Noise tab
+    if (noiseOverrides) {
+      noiseOverrides.style.display = (state.currentTab === 'noise') ? 'block' : 'none';
+      if (state.currentTab === 'noise') {
+        updateNoiseOverrideUI();
+      }
+    }
   } else {
     noSelection.style.display = 'block';
     blobProps.style.display = 'none';
     if (toolProps) toolProps.style.display = 'block';
+    if (noiseOverrides) noiseOverrides.style.display = 'none';
   }
 
   // Update tool defaults UI
@@ -1796,6 +2016,12 @@ function syncNoisePanelUI() {
   document.getElementById('default-roughness-value').textContent = noise.roughness.toFixed(2);
   document.getElementById('default-feature-scale').value = noise.featureScale;
   document.getElementById('default-feature-scale-value').textContent = noise.featureScale.toFixed(2);
+  document.getElementById('default-octaves').value = noise.octaves;
+  document.getElementById('default-octaves-value').textContent = noise.octaves;
+  document.getElementById('default-lacunarity').value = noise.lacunarity;
+  document.getElementById('default-lacunarity-value').textContent = noise.lacunarity.toFixed(1);
+  document.getElementById('default-persistence').value = noise.persistence;
+  document.getElementById('default-persistence-value').textContent = noise.persistence.toFixed(2);
 
   document.getElementById('micro-detail-enabled').checked = microDetail.enabled;
   document.getElementById('micro-detail-amplitude').value = microDetail.amplitude;

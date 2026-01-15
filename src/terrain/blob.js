@@ -14,10 +14,13 @@
  * @param {number} elevation - Peak elevation [0, 1]
  * @param {number} radius - Falloff radius [0, 1]
  * @param {string} profile - Falloff shape: cone, plateau, bowl, shield
+ * @param {Object} [noiseOverride] - Optional per-blob noise override
+ * @param {number} [noiseOverride.roughness] - Override roughness [0, 1]
+ * @param {number} [noiseOverride.featureScale] - Override feature scale [0.05, 0.5]
  * @returns {Object} Blob object
  */
-export function createBlob(id, x, z, elevation = 0.5, radius = 0.25, profile = 'cone') {
-  return {
+export function createBlob(id, x, z, elevation = 0.5, radius = 0.25, profile = 'cone', noiseOverride = null) {
+  const blob = {
     id,
     x,
     z,
@@ -25,6 +28,10 @@ export function createBlob(id, x, z, elevation = 0.5, radius = 0.25, profile = '
     radius,
     profile
   };
+  if (noiseOverride) {
+    blob.noiseOverride = noiseOverride;
+  }
+  return blob;
 }
 
 /**

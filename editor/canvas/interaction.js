@@ -20,7 +20,8 @@ export const DragState = {
   DRAGGING: 'dragging',
   RESIZING: 'resizing',
   PANNING: 'panning',
-  PINCHING: 'pinching'
+  PINCHING: 'pinching',
+  NOISE_ADJUST: 'noise_adjust'
 };
 
 /**
@@ -55,7 +56,10 @@ export function createInteractionState() {
 
     // Selection state (managed externally but tracked here)
     selectedBlob: null,
-    hoveredBlob: null
+    hoveredBlob: null,
+
+    // Noise adjustment tracking (for two-finger gesture on Noise tab)
+    noiseAdjustStart: null  // { roughness, featureScale, midpoint }
   };
 }
 
@@ -236,6 +240,10 @@ function pointToLineDistance(p, a, b) {
  * @param {function} config.onDragMove - Callback during drag { target, worldX, worldZ, radius }
  * @param {function} config.onDragEnd - Callback when drag ends { target, committed }
  * @param {function} config.onViewportChange - Callback when viewport changes
+ * @param {function} config.getCurrentTab - Function to get current tab name (optional)
+ * @param {function} config.getSelectedBlob - Function to get currently selected blob (optional)
+ * @param {function} config.getNoiseDefaults - Function to get noise defaults (optional)
+ * @param {function} config.onNoiseAdjust - Callback for noise adjustment { blob, roughness, featureScale }
  * @param {function} config.render - Function to trigger re-render
  * @returns {object} Handler object with attach/detach methods
  */
@@ -252,6 +260,10 @@ export function createInteractionHandler(config) {
     onDragMove,
     onDragEnd,
     onViewportChange,
+    getCurrentTab,
+    getSelectedBlob,
+    getNoiseDefaults,
+    onNoiseAdjust,
     render
   } = config;
 
@@ -322,6 +334,33 @@ export function createInteractionHandler(config) {
 
     if (touches && touches.length === 2) {
       // Two-finger gesture starting
+      // Check if we should start noise adjustment (Noise tab + selected blob + both touches inside blob)
+      const currentTab = getCurrentTab?.() ?? 'terrain';
+      const selectedBlob = getSelectedBlob?.();
+
+      if (currentTab === 'noise' && selectedBlob && onNoiseAdjust) {
+        const viewport = getViewport();
+        const blobScreen = worldToScreen(viewport, selectedBlob.x, selectedBlob.z);
+        const blobRadiusPixels = selectedBlob.radius * viewport.scale;
+
+        const touch1Dist = distance(touches[0], blobScreen);
+        const touch2Dist = distance(touches[1], blobScreen);
+
+        // Both touches must be within the blob's visual bounds
+        if (touch1Dist < blobRadiusPixels && touch2Dist < blobRadiusPixels) {
+          // Start noise adjustment gesture
+          state.state = DragState.NOISE_ADJUST;
+          const defaults = getNoiseDefaults?.() ?? { roughness: 0.3, featureScale: 0.2 };
+          state.noiseAdjustStart = {
+            roughness: selectedBlob.noiseOverride?.roughness ?? defaults.roughness,
+            featureScale: selectedBlob.noiseOverride?.featureScale ?? defaults.featureScale,
+            midpoint: midpoint(touches[0], touches[1])
+          };
+          return;
+        }
+      }
+
+      // Default: pinch-zoom gesture
       state.state = DragState.PINCHING;
       state.initialPinchDistance = distance(touches[0], touches[1]);
       state.initialPinchMidpoint = midpoint(touches[0], touches[1]);
@@ -390,6 +429,33 @@ export function createInteractionHandler(config) {
     const touches = e.touches ? getTouchPositions(canvas, e.touches) : null;
     const pos = getEventPosition(canvas, e.touches ? e.touches[0] : e);
     const viewport = getViewport();
+
+    if (state.state === DragState.NOISE_ADJUST && touches && touches.length === 2 && state.noiseAdjustStart) {
+      // Two-finger noise adjustment gesture
+      const currentMidpoint = midpoint(touches[0], touches[1]);
+      const deltaY = currentMidpoint.y - state.noiseAdjustStart.midpoint.y;
+      const deltaX = currentMidpoint.x - state.noiseAdjustStart.midpoint.x;
+
+      // Vertical: roughness (up = rougher, so negative deltaY = more rough)
+      const roughnessDelta = -deltaY / 200; // 200px = full range
+      const newRoughness = Math.max(0, Math.min(1,
+        state.noiseAdjustStart.roughness + roughnessDelta));
+
+      // Horizontal: feature scale (right = larger features)
+      const scaleDelta = deltaX / 400; // 400px = full range
+      const newFeatureScale = Math.max(0.05, Math.min(0.5,
+        state.noiseAdjustStart.featureScale + scaleDelta));
+
+      const selectedBlob = getSelectedBlob?.();
+      if (selectedBlob) {
+        onNoiseAdjust?.({
+          blob: selectedBlob,
+          roughness: newRoughness,
+          featureScale: newFeatureScale
+        });
+      }
+      return;
+    }
 
     if (state.state === DragState.PINCHING && touches && touches.length === 2) {
       // Two-finger pinch/pan
@@ -482,6 +548,13 @@ export function createInteractionHandler(config) {
 
     const pos = state.touchStartPos || { x: 0, y: 0 };
     const viewport = getViewport();
+
+    if (state.state === DragState.NOISE_ADJUST) {
+      // End noise adjustment gesture
+      state.state = DragState.IDLE;
+      state.noiseAdjustStart = null;
+      return;
+    }
 
     if (state.state === DragState.PINCHING) {
       // End pinch gesture
