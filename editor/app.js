@@ -92,6 +92,9 @@ const state = {
   panStart: { x: 0, y: 0 },
   mousePos: { x: 0, y: 0 },
 
+  // Drag preview state (for showing outline without recomputing elevation)
+  dragPreview: null,  // { x, z, radius } - preview position/size during drag
+
   // Display options
   showElevation: true,
   showElevationContours: false,
@@ -503,6 +506,7 @@ function render() {
   drawGrid();
   drawWorldBoundary();
   drawBlobs();
+  drawDragPreview();
   drawCursorPreview();
 
   updatePropertiesPanel();
@@ -788,6 +792,28 @@ function drawCursorPreview() {
   ctx.stroke();
 }
 
+function drawDragPreview() {
+  if (!state.dragPreview) return;
+
+  const p = worldToCanvas(state.dragPreview.x, state.dragPreview.z);
+  const radiusPixels = state.dragPreview.radius * state.view.zoom;
+
+  // Draw preview radius circle (dashed, bright)
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, radiusPixels, 0, Math.PI * 2);
+  ctx.strokeStyle = '#e94560';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Draw preview center point
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#e94560';
+  ctx.fill();
+}
+
 // =============================================================================
 // Hydrology Rendering (Tab 3)
 // =============================================================================
@@ -1032,6 +1058,7 @@ const touchHandler = createInteractionHandler({
     state.view.zoom = vp.scale;
   },
   getBlobs: () => state.template.blobs,
+  getCurrentTool: () => state.currentTool,
   onTap: (e) => {
     // Handle tap based on current tool
     if (state.currentTool === 'add') {
@@ -1126,9 +1153,6 @@ canvas.addEventListener('contextmenu', onContextMenu);
 canvas.addEventListener('wheel', onWheel, { passive: false });
 
 function onMouseDown(e) {
-  // Skip if touch handler is processing a gesture
-  if (touchHandler.isGesturing()) return;
-
   const mouse = getMousePos(e);
 
   // Middle mouse button for panning
@@ -1170,6 +1194,8 @@ function onMouseDown(e) {
     if (hitBlob) {
       state.selectedBlob = hitBlob;
       state.isDragging = true;
+      // Initialize drag preview at current blob position
+      state.dragPreview = { x: hitBlob.x, z: hitBlob.z, radius: hitBlob.radius };
 
       // Update tool defaults from selected blob
       state.toolDefaults.elevation = hitBlob.elevation;
@@ -1181,6 +1207,8 @@ function onMouseDown(e) {
       if (radiusHit) {
         state.selectedBlob = radiusHit;
         state.isDraggingRadius = true;
+        // Initialize drag preview at current blob position/radius
+        state.dragPreview = { x: radiusHit.x, z: radiusHit.z, radius: radiusHit.radius };
       } else {
         state.selectedBlob = null;
       }
@@ -1233,23 +1261,22 @@ function onMouseMove(e) {
     return;
   }
 
-  if (state.isDragging && state.selectedBlob) {
+  if (state.isDragging && state.selectedBlob && state.dragPreview) {
+    // Update preview position only (don't modify blob until mouse up)
     const world = canvasToWorld(mouse.x, mouse.y);
-    state.selectedBlob.x = world.x;
-    state.selectedBlob.z = world.z;
-    markVoronoiDirty();
-    render();
+    state.dragPreview.x = world.x;
+    state.dragPreview.z = world.z;
+    render();  // Fast render - just redraws outline, no elevation recompute
     return;
   }
 
-  if (state.isDraggingRadius && state.selectedBlob) {
+  if (state.isDraggingRadius && state.selectedBlob && state.dragPreview) {
+    // Update preview radius only (don't modify blob until mouse up)
     const world = canvasToWorld(mouse.x, mouse.y);
     const dx = world.x - state.selectedBlob.x;
     const dz = world.z - state.selectedBlob.z;
-    state.selectedBlob.radius = Math.max(0.05, Math.sqrt(dx * dx + dz * dz));
-    state.toolDefaults.radius = state.selectedBlob.radius;
-    markElevationDirty();
-    render();
+    state.dragPreview.radius = Math.max(0.05, Math.sqrt(dx * dx + dz * dz));
+    render();  // Fast render - just redraws outline, no elevation recompute
     return;
   }
 
@@ -1275,8 +1302,24 @@ function onMouseUp(e) {
     state.isPanning = false;
     updateCursor();
   }
+
+  // Commit drag preview to actual blob
+  if (state.isDragging && state.selectedBlob && state.dragPreview) {
+    state.selectedBlob.x = state.dragPreview.x;
+    state.selectedBlob.z = state.dragPreview.z;
+    markVoronoiDirty();  // Now recompute elevation
+  }
+
+  if (state.isDraggingRadius && state.selectedBlob && state.dragPreview) {
+    state.selectedBlob.radius = state.dragPreview.radius;
+    state.toolDefaults.radius = state.dragPreview.radius;
+    markElevationDirty();  // Now recompute elevation
+  }
+
   state.isDragging = false;
   state.isDraggingRadius = false;
+  state.dragPreview = null;
+  render();
 }
 
 function onContextMenu(e) {
@@ -1284,21 +1327,32 @@ function onContextMenu(e) {
 }
 
 function onKeyDown(e) {
+  // Don't handle keys when an input element is focused
+  const activeTag = document.activeElement?.tagName?.toLowerCase();
+  if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') {
+    return;
+  }
+
   if (e.key === 'Escape') {
     state.selectedBlob = null;
     state.hoveredBlob = null;
     render();
+    return;
   }
 
   // Delete selected blob with Delete or Backspace
-  if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedBlob) {
-    const index = state.template.blobs.indexOf(state.selectedBlob);
-    if (index !== -1) {
-      state.template.blobs.splice(index, 1);
-      state.selectedBlob = null;
-      markVoronoiDirty();
-      render();
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault(); // Prevent browser back navigation on Backspace
+    if (state.selectedBlob) {
+      const index = state.template.blobs.indexOf(state.selectedBlob);
+      if (index !== -1) {
+        state.template.blobs.splice(index, 1);
+        state.selectedBlob = null;
+        markVoronoiDirty();
+        render();
+      }
     }
+    return;
   }
 }
 

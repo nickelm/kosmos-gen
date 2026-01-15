@@ -230,6 +230,7 @@ function pointToLineDistance(p, a, b) {
  * @param {function} config.getViewport - Function to get current viewport
  * @param {function} config.setViewport - Function to set viewport
  * @param {function} config.getBlobs - Function to get blob array
+ * @param {function} config.getCurrentTool - Function to get current tool name (optional)
  * @param {function} config.onTap - Callback for tap { x, y, worldX, worldZ }
  * @param {function} config.onDragStart - Callback when drag starts { target, type }
  * @param {function} config.onDragMove - Callback during drag { target, worldX, worldZ, radius }
@@ -245,6 +246,7 @@ export function createInteractionHandler(config) {
     getViewport,
     setViewport,
     getBlobs,
+    getCurrentTool,
     onTap,
     onDragStart,
     onDragMove,
@@ -304,6 +306,17 @@ export function createInteractionHandler(config) {
   function handlePointerDown(e) {
     e.preventDefault();
 
+    // Blur any focused input element so keyboard shortcuts work
+    if (document.activeElement && document.activeElement !== document.body) {
+      document.activeElement.blur();
+    }
+
+    // If we're already in a drag/gesture state, don't restart
+    // (can happen when both pointer and touch events fire)
+    if (state.state !== DragState.IDLE) {
+      return;
+    }
+
     const touches = e.touches ? getTouchPositions(canvas, e.touches) : null;
     const pos = getEventPosition(canvas, e.touches ? e.touches[0] : e);
 
@@ -320,13 +333,17 @@ export function createInteractionHandler(config) {
     state.touchStartTime = Date.now();
     state.touchStartPos = pos;
 
-    // Hit test with touch-friendly radius
+    // Get current tool - skip blob hit testing in "add" mode (just add new blobs)
+    const currentTool = getCurrentTool?.() ?? 'select';
+    const shouldHitTestBlobs = currentTool === 'select' || currentTool === 'delete';
+
+    // Hit test with touch-friendly radius (only in select/delete modes)
     const viewport = getViewport();
     const blobs = getBlobs();
 
     // Test vertices first (centers), then edges (radius)
-    let hitCenter = hitTestBlobCenter(blobs, viewport, pos.x, pos.y);
-    let hitRadius = !hitCenter ? hitTestBlobRadius(blobs, viewport, pos.x, pos.y) : null;
+    let hitCenter = shouldHitTestBlobs ? hitTestBlobCenter(blobs, viewport, pos.x, pos.y) : null;
+    let hitRadius = shouldHitTestBlobs && !hitCenter ? hitTestBlobRadius(blobs, viewport, pos.x, pos.y) : null;
 
     if (hitCenter) {
       // Start dragging center
@@ -551,8 +568,14 @@ export function createInteractionHandler(config) {
 
   /**
    * Handle mouse wheel for zoom.
+   * Skip if modifier keys are held (let app handle shift+wheel for elevation, etc.)
    */
   function handleWheel(e) {
+    // Don't handle wheel with modifier keys - let app.js handle shift+wheel, ctrl+wheel
+    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) {
+      return;
+    }
+
     e.preventDefault();
 
     const pos = getEventPosition(canvas, e);
@@ -576,43 +599,30 @@ export function createInteractionHandler(config) {
 
   /**
    * Attach event listeners.
+   * Note: Only touch events are handled here. Mouse events are handled by legacy
+   * handlers in app.js to avoid conflicts.
    */
   function attach() {
-    // Use pointer events for unified handling
-    canvas.addEventListener('pointerdown', handlePointerDown);
-    canvas.addEventListener('pointermove', handlePointerMove);
-    canvas.addEventListener('pointerup', handlePointerUp);
-    canvas.addEventListener('pointercancel', handleTouchCancel);
-
-    // Also handle touch events directly for multi-touch
+    // Use touch events for multi-touch support on iPad/mobile
     canvas.addEventListener('touchstart', handlePointerDown, { passive: false });
     canvas.addEventListener('touchmove', handlePointerMove, { passive: false });
     canvas.addEventListener('touchend', handlePointerUp, { passive: false });
     canvas.addEventListener('touchcancel', handleTouchCancel);
 
-    // Mouse wheel for zoom
+    // Mouse wheel zoom for touch handler (modifier keys handled by app.js)
     canvas.addEventListener('wheel', handleWheel, { passive: false });
-
-    // Context menu
-    canvas.addEventListener('contextmenu', handleContextMenu);
   }
 
   /**
    * Detach event listeners.
    */
   function detach() {
-    canvas.removeEventListener('pointerdown', handlePointerDown);
-    canvas.removeEventListener('pointermove', handlePointerMove);
-    canvas.removeEventListener('pointerup', handlePointerUp);
-    canvas.removeEventListener('pointercancel', handleTouchCancel);
-
     canvas.removeEventListener('touchstart', handlePointerDown);
     canvas.removeEventListener('touchmove', handlePointerMove);
     canvas.removeEventListener('touchend', handlePointerUp);
     canvas.removeEventListener('touchcancel', handleTouchCancel);
 
     canvas.removeEventListener('wheel', handleWheel);
-    canvas.removeEventListener('contextmenu', handleContextMenu);
   }
 
   /**

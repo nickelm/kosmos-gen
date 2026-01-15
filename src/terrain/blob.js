@@ -70,8 +70,42 @@ export const PROFILES = {
 export const PROFILE_NAMES = Object.keys(PROFILES);
 
 /**
- * Evaluate a blob's elevation contribution at a point
+ * Evaluate a blob's influence at a point (weighted average system)
  *
+ * Returns the profile-scaled elevation and weight for weighted average blending.
+ * The profile controls falloff from blob.elevation at center to 0 at radius edge.
+ * The weight (same as falloff) determines how strongly this contributes to the average.
+ *
+ * @param {Object} blob - Blob object
+ * @param {number} x - Query X coordinate
+ * @param {number} z - Query Z coordinate
+ * @returns {{weight: number, elevation: number}|null} Weight and elevation contribution, or null if outside influence
+ */
+export function evaluateBlobInfluence(blob, x, z) {
+  const dx = x - blob.x;
+  const dz = z - blob.z;
+  const dist = Math.sqrt(dx * dx + dz * dz);
+
+  // Normalize distance to [0, 1] within radius
+  const t = dist / blob.radius;
+
+  // Outside influence radius
+  if (t >= 1) return null;
+
+  // Profile determines falloff shape from center to edge
+  const profileFn = PROFILES[blob.profile] || PROFILES.cone;
+  const falloff = profileFn(t);
+
+  return {
+    weight: falloff,
+    elevation: blob.elevation * falloff  // Profile-scaled elevation (0 at edge, peak at center)
+  };
+}
+
+/**
+ * Evaluate a blob's elevation contribution at a point (legacy)
+ *
+ * @deprecated Use evaluateBlobInfluence() for weighted average blending
  * @param {Object} blob - Blob object
  * @param {number} x - Query X coordinate
  * @param {number} z - Query Z coordinate
@@ -119,6 +153,32 @@ export function softmaxCombine(elevations, k = 8) {
 
   // Return ln(sum) / k
   return Math.log(sumExp) / k;
+}
+
+/**
+ * Weighted average combination of blob influences
+ *
+ * Produces bounded results: output is always in [min(elevations), max(elevations)]
+ * of contributing blobs. Cannot exceed the highest input elevation.
+ *
+ * @param {{weight: number, elevation: number}[]} contributions - Array of {weight, elevation}
+ * @returns {number} Weighted average elevation, or 0 if no contributions
+ */
+export function weightedAverageCombine(contributions) {
+  if (contributions.length === 0) return 0;
+  if (contributions.length === 1) return contributions[0].elevation;
+
+  let totalWeight = 0;
+  let totalWeightedElevation = 0;
+
+  for (const { weight, elevation } of contributions) {
+    totalWeight += weight;
+    totalWeightedElevation += weight * elevation;
+  }
+
+  if (totalWeight === 0) return 0;
+
+  return totalWeightedElevation / totalWeight;
 }
 
 /**

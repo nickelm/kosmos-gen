@@ -1,10 +1,11 @@
 /**
  * Elevation sampling from blob-based terrain
  *
- * Uses softmax blending of circular blob influences.
+ * Uses weighted average blending of circular blob influences.
+ * Result is always bounded within [min, max] of contributing blob elevations.
  */
 
-import { evaluateBlobAt, softmaxCombine, PROFILES } from './blob.js';
+import { evaluateBlobInfluence, weightedAverageCombine, PROFILES } from './blob.js';
 import { createDomainWarp, DEFAULT_WARP_CONFIG } from '../core/warp.js';
 import { sampleSurfaceNoise, DEFAULT_SURFACE_NOISE_CONFIG } from './surfacenoise.js';
 import { sampleRidgeNoise, DEFAULT_RIDGE_NOISE_CONFIG } from './ridgenoise.js';
@@ -42,7 +43,7 @@ function getWarpFunction(world) {
 /**
  * Sample elevation at a world position
  *
- * Computes base elevation from blob contributions using softmax blending,
+ * Computes base elevation from blob contributions using weighted average blending,
  * then optionally adds noise layers and river carving.
  *
  * @param {Object} world - World data containing blobs
@@ -66,17 +67,17 @@ export function sampleElevation(world, x, z, options = {}) {
   const warp = getWarpFunction(world);
   const [wx, wz] = warp(x, z);
 
-  // Collect elevation contributions from all blobs
+  // Collect influence contributions from all blobs
   const contributions = [];
   for (const blob of blobs) {
-    const e = evaluateBlobAt(blob, wx, wz);
-    if (e > 0) {
-      contributions.push(e);
+    const influence = evaluateBlobInfluence(blob, wx, wz);
+    if (influence && influence.weight > 0) {
+      contributions.push(influence);
     }
   }
 
-  // Combine using softmax
-  let elevation = softmaxCombine(contributions);
+  // Combine using weighted average (bounded result)
+  let elevation = weightedAverageCombine(contributions);
 
   // Add ridge/erosion noise (drainage patterns)
   if (includeNoise) {

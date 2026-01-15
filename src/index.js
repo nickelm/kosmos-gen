@@ -33,8 +33,10 @@ export {
 // Terrain - Blob system
 export {
   createBlob,
-  evaluateBlobAt,
-  softmaxCombine,
+  evaluateBlobInfluence,
+  weightedAverageCombine,
+  evaluateBlobAt,       // Legacy - use evaluateBlobInfluence instead
+  softmaxCombine,       // Legacy - use weightedAverageCombine instead
   generateBlobId,
   PROFILES,
   PROFILE_NAMES
