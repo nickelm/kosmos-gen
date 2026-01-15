@@ -29,10 +29,9 @@ export function createViewport(canvasWidth = 800, canvasHeight = 600) {
  * @returns {number} Clamped scale
  */
 export function clampScale(scale) {
-  // Convert from zoom units (50-2000) to normalized scale (0.25-4.0)
-  // The editor uses zoom values around 200-400 for typical views
   // Clamp raw zoom value to reasonable bounds
-  return Math.max(50, Math.min(2000, scale));
+  // Min 50 gives zoomed-out view, max 8000 allows very close zoom
+  return Math.max(50, Math.min(8000, scale));
 }
 
 /**

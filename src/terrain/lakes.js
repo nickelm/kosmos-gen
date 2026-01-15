@@ -160,8 +160,13 @@ export function computeLakeFill(flowGrid, lake) {
 
   // The water level is the spill elevation
   // (water fills up to the lowest point on the rim)
-  lake.waterLevel = spillElev;
-  lake.spillElevation = spillElev;
+  // But cap the water level to prevent unrealistically large lakes
+  // Only raise water level slightly above the minimum sink elevation
+  const maxWaterRise = 0.05; // Maximum water can rise above basin floor
+  const constrainedSpillElev = Math.min(spillElev, minElev + maxWaterRise);
+
+  lake.waterLevel = constrainedSpillElev;
+  lake.spillElevation = spillElev; // Keep original for reference
 
   if (spillIdx >= 0) {
     const { cellX, cellZ } = indexToCell(flowGrid, spillIdx);
@@ -178,16 +183,24 @@ export function computeLakeFill(flowGrid, lake) {
   }
 
   // Recalculate area based on fill level
-  // Count cells at or below water level within the basin
+  // Only fill cells that are:
+  // 1. At or below water level
+  // 2. Connected to the sink through cells at or below water level
+  // This prevents filling disconnected areas at the same elevation
   const filledCells = [];
   const fillVisited = new Set();
   const fillQueue = [...lake.sinkCells];
 
-  while (fillQueue.length > 0) {
+  // Limit maximum lake size to prevent runaway fills
+  const maxLakeCells = 10000;
+
+  while (fillQueue.length > 0 && filledCells.length < maxLakeCells) {
     const idx = fillQueue.shift();
     if (fillVisited.has(idx)) continue;
 
     const elev = flowGrid.elevation[idx];
+
+    // Only include cells at or below water level
     if (elev > lake.waterLevel) continue;
 
     fillVisited.add(idx);
@@ -201,7 +214,12 @@ export function computeLakeFill(flowGrid, lake) {
 
       const neighborIdx = cellIndex(flowGrid, nx, nz);
       if (!fillVisited.has(neighborIdx)) {
-        fillQueue.push(neighborIdx);
+        // Only expand to neighbors at or below water level
+        // This ensures we only fill the connected basin
+        const neighborElev = flowGrid.elevation[neighborIdx];
+        if (neighborElev <= lake.waterLevel) {
+          fillQueue.push(neighborIdx);
+        }
       }
     }
   }
@@ -221,7 +239,8 @@ export function extractLakeBoundary(world, lake) {
   if (!lake.waterLevel || lake.waterLevel <= 0) return [];
 
   // Use a small area around the lake center
-  const radius = Math.sqrt(lake.area) * 2 + 0.1;
+  const estimatedRadius = Math.sqrt(Math.max(lake.area || 0.001, 0.001) / Math.PI);
+  const radius = Math.max(estimatedRadius * 3, 0.15);
   const bounds = {
     minX: lake.x - radius,
     maxX: lake.x + radius,
@@ -254,6 +273,20 @@ export function extractLakeBoundary(world, lake) {
         bestDist = dist;
         bestContour = contour;
       }
+    }
+  }
+
+  // If no good contour found, generate a simple circular boundary
+  if (bestContour.length < 3) {
+    const circleRadius = estimatedRadius || 0.02;
+    const points = 16;
+    bestContour = [];
+    for (let i = 0; i < points; i++) {
+      const angle = (i / points) * Math.PI * 2;
+      bestContour.push({
+        x: lake.x + Math.cos(angle) * circleRadius,
+        z: lake.z + Math.sin(angle) * circleRadius
+      });
     }
   }
 

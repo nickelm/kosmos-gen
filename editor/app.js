@@ -19,7 +19,15 @@ import { createFBmNoise, unipolar } from '../src/core/noise.js';
 import { deriveSeed } from '../src/core/seeds.js';
 import { generateHydrology, DEFAULT_HYDROLOGY_CONFIG } from '../src/terrain/hydrology.js';
 import { createManualSource } from '../src/terrain/watersources.js';
-import { createManualLake } from '../src/terrain/lakes.js';
+import { computeBlobCells as computeVoronoiCells } from '../src/geometry/voronoi.js';
+import {
+  worldToCell,
+  cellIndex,
+  isValidCell,
+  indexToCell,
+  cellToWorld,
+  D8_DIRECTIONS
+} from '../src/terrain/flowgrid.js';
 
 // Touch/gesture modules
 import {
@@ -106,6 +114,7 @@ const state = {
   showElevation: true,
   showElevationContours: false,
   showVoronoiCells: true,
+  showWater: true,
 
   // Hydrology state (Tab 3)
   hydrology: {
@@ -113,16 +122,16 @@ const state = {
     lakes: [],
     waterSources: [],
     flowGrid: null,
-    config: { ...DEFAULT_HYDROLOGY_CONFIG, autoDetect: false },
+    config: { ...DEFAULT_HYDROLOGY_CONFIG, autoDetect: false, carveEnabled: true, carveFactor: 0.04 },
     cacheKey: null,
     showFlowGrid: false,
-    showWatersheds: false,
-    showWaterSources: true
+    showWaterSources: true,
+    simulationNeeded: false  // Track when simulation needs to be rerun
   },
 
   // Hydrology selection
   selectedSource: null,
-  selectedLake: null,
+  hoveredSource: null,
 
   // Layered cache with dirty flags
   cache: {
@@ -159,6 +168,31 @@ function markVoronoiDirty() {
 function markElevationDirty() {
   state.cache.elevationDirty = true;
   state.cache.derivedDirty = true;
+}
+
+/**
+ * Mark that hydrology simulation needs to be re-run
+ * Updates the Simulate Water button to show a notification indicator
+ */
+function markSimulationNeeded() {
+  state.hydrology.simulationNeeded = true;
+  updateSimulateButtonState();
+}
+
+/**
+ * Update the Simulate Water button appearance based on simulation state
+ */
+function updateSimulateButtonState() {
+  const btn = document.getElementById('simulate-water');
+  if (!btn) return;
+
+  if (state.hydrology.simulationNeeded) {
+    btn.classList.add('needs-simulation');
+    btn.title = 'Simulation out of date - click to update';
+  } else {
+    btn.classList.remove('needs-simulation');
+    btn.title = 'Run water simulation';
+  }
 }
 
 // Deferred regeneration to coalesce rapid edits
@@ -219,7 +253,10 @@ function computeTextureBounds() {
 }
 
 function regenerateElevationTexture() {
-  const world = buildWorld();
+  // Include hydrology on tabs 3+ if rivers exist and carving is enabled
+  const includeHydrology = state.currentTab !== 'terrain' && state.currentTab !== 'noise' &&
+                           state.hydrology.rivers.length > 0 && state.hydrology.config.carveEnabled;
+  const world = buildWorld(includeHydrology);
 
   // Compute bounds from blobs
   state.cache.textureBounds = computeTextureBounds();
@@ -240,7 +277,7 @@ function regenerateElevationTexture() {
 
   const applyNoise = state.currentTab !== 'terrain';
   const sample = applyNoise
-    ? (x, z) => sampleElevationWithNoise(world, x, z, true)
+    ? (x, z) => sampleElevationWithNoise(world, x, z, true, includeHydrology)
     : (x, z) => sampleElevation(world, x, z);
 
   // Rasterize with shading
@@ -380,12 +417,20 @@ function canvasToWorld(cx, cy) {
 // World Building
 // =============================================================================
 
-function buildWorld() {
-  return {
+function buildWorld(includeHydrology = false) {
+  const world = {
     seed: state.seed,
     template: { blobs: state.template.blobs },
     defaults: state.template.defaults
   };
+
+  // Include hydrology data if requested and available
+  if (includeHydrology && state.hydrology.rivers.length > 0) {
+    world.rivers = state.hydrology.rivers;
+    world.hydrologyConfig = state.hydrology.config;
+  }
+
+  return world;
 }
 
 // =============================================================================
@@ -465,8 +510,11 @@ function blendNoiseParams(contributions, defaults) {
   };
 }
 
-function sampleElevationWithNoise(world, x, z, applyNoise) {
-  const baseElevation = sampleElevation(world, x, z);
+function sampleElevationWithNoise(world, x, z, applyNoise, includeHydrology = false) {
+  // Use sampleElevation with hydrology option if requested
+  const baseElevation = includeHydrology
+    ? sampleElevation(world, x, z, { includeHydrology: true })
+    : sampleElevation(world, x, z);
 
   if (!applyNoise || baseElevation <= 0) {
     return baseElevation;
@@ -584,14 +632,22 @@ function render() {
     drawFlowGrid();
   }
 
-  if (state.currentTab === 'hydrology' || state.currentTab === 'climate' ||
-      state.currentTab === 'zones' || state.currentTab === 'content') {
-    drawLakes();
-    drawRivers();
+  // Draw water features if enabled
+  if (state.showWater) {
+    if (state.currentTab === 'hydrology' || state.currentTab === 'climate' ||
+        state.currentTab === 'zones' || state.currentTab === 'content') {
+      drawLakes();
+      drawRivers();
+    }
+
+    if (state.currentTab === 'hydrology') {
+      drawWaterSources();
+    }
   }
 
-  if (state.currentTab === 'hydrology') {
-    drawWaterSources();
+  // Draw flow arrow preview for add-source tool
+  if (state.currentTab === 'hydrology' && state.currentTool === 'add-source') {
+    drawFlowArrowPreview();
   }
 
   if (state.showVoronoiCells) {
@@ -922,7 +978,25 @@ function getHydrologyCacheKey() {
   return `${state.seed}|${blobData}|${configData}|${sourcesData}`;
 }
 
-function runHydrologySimulation() {
+/**
+ * Show/hide/update the hydrology progress bar
+ * @param {boolean} show - Whether to show the progress bar
+ * @param {number} progress - Progress value 0-100
+ * @param {string} text - Status text to display
+ */
+function updateHydrologyProgress(show, progress = 0, text = 'Computing...') {
+  const container = document.getElementById('hydrology-progress');
+  const fill = document.getElementById('hydrology-progress-fill');
+  const textEl = document.getElementById('hydrology-progress-text');
+
+  if (!container) return;
+
+  container.style.display = show ? 'block' : 'none';
+  if (fill) fill.style.width = `${progress}%`;
+  if (textEl) textEl.textContent = text;
+}
+
+async function runHydrologySimulation() {
   if (state.template.blobs.length === 0) {
     state.hydrology.rivers = [];
     state.hydrology.lakes = [];
@@ -932,6 +1006,12 @@ function runHydrologySimulation() {
     return;
   }
 
+  // Show progress bar
+  updateHydrologyProgress(true, 0, 'Initializing...');
+
+  // Allow UI to update before heavy computation
+  await new Promise(resolve => setTimeout(resolve, 10));
+
   const world = buildWorld();
   world.hydrologyConfig = state.hydrology.config;
   world.waterSources = state.hydrology.waterSources.filter(s => s.origin === 'manual');
@@ -940,7 +1020,13 @@ function runHydrologySimulation() {
   const bounds = calculateTerrainBounds();
 
   try {
+    updateHydrologyProgress(true, 20, 'Sampling elevation...');
+    await new Promise(resolve => setTimeout(resolve, 10));
+
     const result = generateHydrology(world, { bounds });
+
+    updateHydrologyProgress(true, 80, 'Tracing rivers...');
+    await new Promise(resolve => setTimeout(resolve, 10));
 
     state.hydrology.rivers = result.rivers;
     state.hydrology.lakes = result.lakes;
@@ -948,10 +1034,23 @@ function runHydrologySimulation() {
     state.hydrology.flowGrid = result.flowGrid;
     state.hydrology.cacheKey = getHydrologyCacheKey();
 
+    updateHydrologyProgress(true, 100, `Done: ${result.rivers.length} rivers, ${result.lakes.length} lakes`);
+
     console.log(`Hydrology: ${result.rivers.length} rivers, ${result.lakes.length} lakes, ${result.waterSources.length} sources`);
   } catch (err) {
     console.error('Hydrology generation failed:', err);
+    updateHydrologyProgress(true, 0, 'Error: simulation failed');
   }
+
+  // Mark elevation as dirty since rivers may carve terrain
+  if (state.hydrology.config.carveEnabled && state.hydrology.rivers.length > 0) {
+    markElevationDirty();
+  }
+
+  // Hide progress bar after a short delay
+  setTimeout(() => {
+    updateHydrologyProgress(false);
+  }, 1500);
 
   render();
 }
@@ -971,7 +1070,8 @@ function calculateTerrainBounds() {
     maxZ = Math.max(maxZ, blob.z + blob.radius);
   }
 
-  const margin = 0.1;
+  // Larger margin to ensure rivers can flow to the coast/sea
+  const margin = 0.3;
   return {
     minX: minX - margin,
     maxX: maxX + margin,
@@ -1129,6 +1229,372 @@ function drawFlowGrid() {
   }
 }
 
+/**
+ * Trace a preview river path from a starting position (for hover preview)
+ * Returns an array of vertices or null if no valid path
+ */
+function tracePreviewRiver(grid, startX, startZ, maxSteps = 500) {
+  const cell = worldToCell(grid, startX, startZ);
+  if (!isValidCell(grid, cell.cellX, cell.cellZ)) return null;
+
+  const vertices = [];
+  const visited = new Set();
+  let currentIdx = cellIndex(grid, cell.cellX, cell.cellZ);
+  let termination = 'coast';
+
+  while (currentIdx !== null && !visited.has(currentIdx) && vertices.length < maxSteps) {
+    visited.add(currentIdx);
+
+    const { cellX, cellZ } = indexToCell(grid, currentIdx);
+    const { x, z } = cellToWorld(grid, cellX, cellZ);
+    const elevation = grid.elevation[currentIdx];
+
+    vertices.push({ x, z, elevation });
+
+    // Stop at sea level
+    if (elevation <= 0.1) {
+      termination = 'coast';
+      break;
+    }
+
+    // Get downstream cell
+    const flowDir = grid.flowDirection[currentIdx];
+    if (flowDir === 255) {
+      termination = 'basin';
+      break;
+    }
+
+    const dir = D8_DIRECTIONS[flowDir];
+    const nx = cellX + dir.dx;
+    const nz = cellZ + dir.dz;
+
+    if (!isValidCell(grid, nx, nz)) {
+      termination = 'boundary';
+      break;
+    }
+
+    currentIdx = cellIndex(grid, nx, nz);
+  }
+
+  return { vertices, termination };
+}
+
+/**
+ * Draw flow direction arrow preview under cursor when placing water sources
+ * Shows the full predicted river path and potential lake location
+ */
+function drawFlowArrowPreview() {
+  if (state.isPanning || state.isDragging) return;
+
+  const grid = state.hydrology.flowGrid;
+  if (!grid) return;
+
+  const { x: worldX, z: worldZ } = canvasToWorld(state.mousePos.x, state.mousePos.y);
+  const cell = worldToCell(grid, worldX, worldZ);
+
+  if (!isValidCell(grid, cell.cellX, cell.cellZ)) return;
+
+  const idx = cellIndex(grid, cell.cellX, cell.cellZ);
+  const flowDir = grid.flowDirection[idx];
+
+  // Trace the full preview river path
+  const preview = tracePreviewRiver(grid, worldX, worldZ);
+
+  if (preview && preview.vertices.length >= 2) {
+    // Draw the preview river path
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.beginPath();
+    const firstP = worldToCanvas(preview.vertices[0].x, preview.vertices[0].z);
+    ctx.moveTo(firstP.x, firstP.y);
+
+    for (let i = 1; i < preview.vertices.length; i++) {
+      const p = worldToCanvas(preview.vertices[i].x, preview.vertices[i].z);
+      ctx.lineTo(p.x, p.y);
+    }
+
+    ctx.strokeStyle = 'rgba(64, 164, 223, 0.4)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // If river terminates in a basin, show lake indicator
+    if (preview.termination === 'basin' && preview.vertices.length > 0) {
+      const lastV = preview.vertices[preview.vertices.length - 1];
+      const lakeP = worldToCanvas(lastV.x, lastV.z);
+
+      // Draw lake indicator circle
+      ctx.beginPath();
+      ctx.arc(lakeP.x, lakeP.y, 15, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(64, 164, 223, 0.3)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(64, 164, 223, 0.6)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 2]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Lake label
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.font = '10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('lake', lakeP.x, lakeP.y + 4);
+    }
+  }
+
+  // Draw source preview circle at cursor
+  const p = worldToCanvas(worldX, worldZ);
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(64, 164, 223, 0.6)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Draw flow direction arrow if there's a valid flow direction (not sink)
+  if (flowDir !== 255) {
+    const dir = D8_DIRECTIONS[flowDir];
+    const arrowLength = 25;
+    const arrowHeadSize = 8;
+
+    // Arrow direction (normalized)
+    const dx = dir.dx;
+    const dz = dir.dz;
+    const len = Math.sqrt(dx * dx + dz * dz);
+    const nx = dx / len;
+    const nz = dz / len;
+
+    // Arrow end point
+    const endX = p.x + nx * arrowLength;
+    const endY = p.y + nz * arrowLength;
+
+    // Draw arrow line
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(endX, endY);
+    ctx.strokeStyle = 'rgba(64, 164, 223, 0.9)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Draw arrow head
+    const angle = Math.atan2(nz, nx);
+    ctx.beginPath();
+    ctx.moveTo(endX, endY);
+    ctx.lineTo(
+      endX - arrowHeadSize * Math.cos(angle - Math.PI / 6),
+      endY - arrowHeadSize * Math.sin(angle - Math.PI / 6)
+    );
+    ctx.lineTo(
+      endX - arrowHeadSize * Math.cos(angle + Math.PI / 6),
+      endY - arrowHeadSize * Math.sin(angle + Math.PI / 6)
+    );
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(64, 164, 223, 0.9)';
+    ctx.fill();
+  } else {
+    // Sink indicator (water will pool here)
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('pool', p.x, p.y + 22);
+  }
+}
+
+// =============================================================================
+// Helper Functions for Water Sources and Blobs
+// =============================================================================
+
+/**
+ * Hit test for water sources
+ * @param {number} cx - Canvas X coordinate
+ * @param {number} cy - Canvas Y coordinate
+ * @param {number} threshold - Hit distance threshold in pixels
+ * @returns {Object|null} The hit water source or null
+ */
+function hitTestWaterSource(cx, cy, threshold = 12) {
+  const sources = state.hydrology.waterSources;
+  if (!sources) return null;
+
+  for (const source of sources) {
+    const p = worldToCanvas(source.x, source.z);
+    const dx = cx - p.x;
+    const dy = cy - p.y;
+    if (Math.sqrt(dx * dx + dy * dy) < threshold) {
+      return source;
+    }
+  }
+  return null;
+}
+
+/**
+ * Delete a water source
+ * @param {Object} source - The water source to delete
+ */
+function deleteWaterSource(source) {
+  const index = state.hydrology.waterSources.indexOf(source);
+  if (index !== -1) {
+    state.hydrology.waterSources.splice(index, 1);
+    if (state.selectedSource === source) {
+      state.selectedSource = null;
+    }
+
+    // Also remove any rivers that originated from this source
+    // This prevents stale carving from remaining visible
+    const sourceId = source.id;
+    state.hydrology.rivers = state.hydrology.rivers.filter(river => river.sourceId !== sourceId);
+
+    // Also remove lakes created by rivers from this source
+    state.hydrology.lakes = state.hydrology.lakes.filter(lake => {
+      if (lake.origin === 'river_basin' && lake.inflowRiverId) {
+        // Check if the inflow river was from this source
+        return !lake.inflowRiverId.includes(sourceId);
+      }
+      return true;
+    });
+
+    // Mark elevation dirty since carving may have changed
+    if (state.hydrology.config.carveEnabled) {
+      markElevationDirty();
+    }
+
+    markSimulationNeeded();
+    render();
+  }
+}
+
+/**
+ * Delete a blob and its associated water sources
+ * @param {Object} blob - The blob to delete
+ */
+function deleteBlob(blob) {
+  const index = state.template.blobs.indexOf(blob);
+  if (index !== -1) {
+    state.template.blobs.splice(index, 1);
+    if (state.selectedBlob === blob) {
+      state.selectedBlob = null;
+    }
+    // Also delete water sources owned by this blob
+    deleteWaterSourcesForBlob(blob);
+    markVoronoiDirty();
+    // Mark simulation as needed since terrain changed
+    if (state.hydrology.rivers.length > 0 || state.hydrology.waterSources.length > 0) {
+      markSimulationNeeded();
+    }
+    render();
+  }
+}
+
+/**
+ * Delete water sources that belong to a specific blob (based on Voronoi ownership)
+ * @param {Object} blob - The blob whose water sources should be deleted
+ */
+function deleteWaterSourcesForBlob(blob) {
+  if (state.template.blobs.length === 0) {
+    // If no blobs remain, delete all manual water sources
+    state.hydrology.waterSources = state.hydrology.waterSources.filter(s => s.origin !== 'manual');
+    return;
+  }
+
+  // Compute Voronoi cells to determine ownership
+  const bounds = { minX: -10, maxX: 10, minZ: -10, maxZ: 10 };
+  const cells = computeVoronoiCells(state.template.blobs, bounds);
+
+  // Remove sources that were owned by the deleted blob
+  state.hydrology.waterSources = state.hydrology.waterSources.filter(source => {
+    if (source.origin !== 'manual') return true;
+    // Check which blob's cell contains this source
+    const ownerBlob = findOwnerBlob(source.x, source.z, cells, state.template.blobs);
+    // Keep if owner is not the deleted blob (owner will be null if blob was deleted)
+    return ownerBlob !== null && ownerBlob !== blob;
+  });
+}
+
+/**
+ * Find which blob owns a point based on Voronoi cells
+ * @param {number} x - World X coordinate
+ * @param {number} z - World Z coordinate
+ * @param {Map} cells - Voronoi cells map (blobId -> polygon)
+ * @param {Array} blobs - Array of blobs
+ * @returns {Object|null} The owning blob or null
+ */
+function findOwnerBlob(x, z, cells, blobs) {
+  for (const blob of blobs) {
+    const polygon = cells.get(blob.id);
+    if (polygon && pointInPolygon(x, z, polygon)) {
+      return blob;
+    }
+  }
+  // Fallback: find nearest blob
+  return findNearestBlob(blobs, x, z);
+}
+
+/**
+ * Simple point-in-polygon test
+ */
+function pointInPolygon(x, z, polygon) {
+  if (!polygon || polygon.length < 3) return false;
+
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x, zi = polygon[i].z;
+    const xj = polygon[j].x, zj = polygon[j].z;
+
+    if (((zi > z) !== (zj > z)) &&
+        (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/**
+ * Move water sources when their owning blob moves
+ * @param {Object} blob - The blob that moved
+ * @param {number} oldX - Previous X position
+ * @param {number} oldZ - Previous Z position
+ */
+function moveWaterSourcesWithBlob(blob, oldX, oldZ) {
+  const dx = blob.x - oldX;
+  const dz = blob.z - oldZ;
+
+  if (dx === 0 && dz === 0) return;
+
+  // Find manual water sources owned by this blob
+  for (const source of state.hydrology.waterSources) {
+    if (source.origin !== 'manual') continue;
+
+    // Check if this source is in the blob's Voronoi cell (using old position)
+    // We need to check using old position since blob already moved
+    const sourceRelX = source.x - dx; // Source position relative to old blob pos
+    const sourceRelZ = source.z - dz;
+
+    // Simple heuristic: if source was closer to this blob than others, move it
+    const distToBlob = Math.sqrt(
+      Math.pow(sourceRelX - oldX, 2) + Math.pow(sourceRelZ - oldZ, 2)
+    );
+
+    let isClosest = true;
+    for (const other of state.template.blobs) {
+      if (other === blob) continue;
+      const distToOther = Math.sqrt(
+        Math.pow(sourceRelX - other.x, 2) + Math.pow(sourceRelZ - other.z, 2)
+      );
+      if (distToOther < distToBlob) {
+        isClosest = false;
+        break;
+      }
+    }
+
+    if (isClosest) {
+      source.x += dx;
+      source.z += dz;
+    }
+  }
+}
+
 // =============================================================================
 // Interaction
 // =============================================================================
@@ -1183,18 +1649,19 @@ const touchHandler = createInteractionHandler({
       }
       render();
     } else if (state.currentTool === 'delete') {
+      // Check for water source hit first (on hydrology tab)
+      if (state.currentTab === 'hydrology' && state.showWater) {
+        const hitSource = hitTestWaterSource(e.x, e.y);
+        if (hitSource) {
+          deleteWaterSource(hitSource);
+          return;
+        }
+      }
+      // Then check for blob hit
       const hitBlob = touchHitTestCenter(state.template.blobs, state.view, e.x, e.y) ||
                       touchHitTestRadius(state.template.blobs, state.view, e.x, e.y);
       if (hitBlob) {
-        const index = state.template.blobs.indexOf(hitBlob);
-        if (index !== -1) {
-          state.template.blobs.splice(index, 1);
-          if (state.selectedBlob === hitBlob) {
-            state.selectedBlob = null;
-          }
-          markVoronoiDirty();
-          render();
-        }
+        deleteBlob(hitBlob);
       }
     } else if (state.currentTool === 'add-source') {
       const source = createManualSource(e.worldX, e.worldZ, {
@@ -1203,16 +1670,8 @@ const touchHandler = createInteractionHandler({
       });
       state.hydrology.waterSources.push(source);
       state.selectedSource = source;
-      runHydrologySimulation();
-    } else if (state.currentTool === 'add-lake') {
-      const lake = createManualLake(e.worldX, e.worldZ, {
-        id: `lake_manual_${Date.now()}`,
-        waterLevel: 0.15,
-        area: 0.01
-      });
-      state.hydrology.lakes.push(lake);
-      state.selectedLake = lake;
-      runHydrologySimulation();
+      markSimulationNeeded();
+      render();
     }
   },
   onDragStart: ({ target, type }) => {
@@ -1325,16 +1784,18 @@ function onMouseDown(e) {
     }
     render();
   } else if (state.currentTool === 'delete') {
+    // Check for water source hit first (on hydrology tab)
+    if (state.currentTab === 'hydrology' && state.showWater) {
+      const hitSource = hitTestWaterSource(mouse.x, mouse.y);
+      if (hitSource) {
+        deleteWaterSource(hitSource);
+        return;
+      }
+    }
+    // Then check for blob hit
     const hitBlob = hitTestBlobCenter(mouse.x, mouse.y) || hitTestBlobRadius(mouse.x, mouse.y);
     if (hitBlob) {
-      const index = state.template.blobs.indexOf(hitBlob);
-      if (index !== -1) {
-        state.template.blobs.splice(index, 1);
-        if (state.selectedBlob === hitBlob) {
-          state.selectedBlob = null;
-        }
-        markVoronoiDirty();
-      }
+      deleteBlob(hitBlob);
     }
     render();
   } else if (state.currentTool === 'add-source') {
@@ -1344,16 +1805,8 @@ function onMouseDown(e) {
     });
     state.hydrology.waterSources.push(source);
     state.selectedSource = source;
-    runHydrologySimulation();
-  } else if (state.currentTool === 'add-lake') {
-    const lake = createManualLake(world.x, world.z, {
-      id: `lake_manual_${Date.now()}`,
-      waterLevel: 0.15,
-      area: 0.01
-    });
-    state.hydrology.lakes.push(lake);
-    state.selectedLake = lake;
-    runHydrologySimulation();
+    markSimulationNeeded();
+    render();
   }
 }
 
@@ -1405,6 +1858,11 @@ function onMouseMove(e) {
       render();
     }
   }
+
+  // Render for add-source mode to show flow arrow preview under cursor
+  if (state.currentTool === 'add-source' && state.currentTab === 'hydrology') {
+    render();
+  }
 }
 
 function onMouseUp(e) {
@@ -1415,15 +1873,27 @@ function onMouseUp(e) {
 
   // Commit drag preview to actual blob
   if (state.isDragging && state.selectedBlob && state.dragPreview) {
+    const oldX = state.selectedBlob.x;
+    const oldZ = state.selectedBlob.z;
     state.selectedBlob.x = state.dragPreview.x;
     state.selectedBlob.z = state.dragPreview.z;
+    // Move water sources that belong to this blob
+    moveWaterSourcesWithBlob(state.selectedBlob, oldX, oldZ);
     markVoronoiDirty();  // Now recompute elevation
+    // Mark that hydrology needs re-simulation if we have rivers
+    if (state.hydrology.rivers.length > 0 || state.hydrology.waterSources.length > 0) {
+      markSimulationNeeded();
+    }
   }
 
   if (state.isDraggingRadius && state.selectedBlob && state.dragPreview) {
     state.selectedBlob.radius = state.dragPreview.radius;
     state.toolDefaults.radius = state.dragPreview.radius;
     markElevationDirty();  // Now recompute elevation
+    // Mark that hydrology needs re-simulation if we have rivers
+    if (state.hydrology.rivers.length > 0 || state.hydrology.waterSources.length > 0) {
+      markSimulationNeeded();
+    }
   }
 
   state.isDragging = false;
@@ -1450,17 +1920,17 @@ function onKeyDown(e) {
     return;
   }
 
-  // Delete selected blob with Delete or Backspace
+  // Delete selected blob or water source with Delete or Backspace
   if (e.key === 'Delete' || e.key === 'Backspace') {
     e.preventDefault(); // Prevent browser back navigation on Backspace
+    // Delete selected water source if on hydrology tab
+    if (state.selectedSource && state.currentTab === 'hydrology') {
+      deleteWaterSource(state.selectedSource);
+      return;
+    }
+    // Delete selected blob
     if (state.selectedBlob) {
-      const index = state.template.blobs.indexOf(state.selectedBlob);
-      if (index !== -1) {
-        state.template.blobs.splice(index, 1);
-        state.selectedBlob = null;
-        markVoronoiDirty();
-        render();
-      }
+      deleteBlob(state.selectedBlob);
     }
     return;
   }
@@ -1475,8 +1945,21 @@ function onWheel(e) {
   e.preventDefault();
   const mouse = getMousePos(e);
 
-  // Shift+wheel: adjust elevation of selected or hovered blob
+  // Shift+wheel: adjust elevation of blob OR flow rate of water source
   if (e.shiftKey) {
+    // On hydrology tab with water sources visible, check for water source first
+    if (state.currentTab === 'hydrology' && state.showWater && state.hydrology.showWaterSources) {
+      const hitSource = hitTestWaterSource(mouse.x, mouse.y);
+      if (hitSource) {
+        const delta = e.deltaY > 0 ? -0.05 : 0.05;
+        hitSource.flowRate = Math.max(0.1, Math.min(1, hitSource.flowRate + delta));
+        state.selectedSource = hitSource;
+        markSimulationNeeded();
+        render();
+        return;
+      }
+    }
+
     // If hovering a blob, select it first
     if (state.hoveredBlob && state.hoveredBlob !== state.selectedBlob) {
       state.selectedBlob = state.hoveredBlob;
@@ -1568,16 +2051,13 @@ function updateTabUI() {
   const hydrologySettings = document.getElementById('hydrology-settings');
   const hydrologyTools = document.querySelectorAll('.hydrology-tool');
 
+  // Show/hide noise settings panel (but don't change the warp.enabled setting)
   if (state.currentTab === 'noise') {
     noiseSettings.style.display = 'block';
-    state.template.defaults.warp.enabled = true;
-    document.getElementById('warp-enabled').checked = true;
+    // Sync checkbox with current state
+    document.getElementById('warp-enabled').checked = state.template.defaults.warp.enabled;
   } else {
     noiseSettings.style.display = 'none';
-    if (state.currentTab === 'terrain') {
-      state.template.defaults.warp.enabled = false;
-      document.getElementById('warp-enabled').checked = false;
-    }
   }
 
   if (hydrologySettings) {
@@ -1590,7 +2070,6 @@ function updateTabUI() {
 
   if (state.currentTab !== 'hydrology') {
     state.selectedSource = null;
-    state.selectedLake = null;
   }
 }
 
@@ -1626,12 +2105,23 @@ document.getElementById('randomize').addEventListener('click', () => {
 });
 
 document.getElementById('clear-canvas').addEventListener('click', () => {
-  if (state.template.blobs.length === 0) return;
-  if (confirm('Clear all blobs? This cannot be undone.')) {
+  const hasBlobs = state.template.blobs.length > 0;
+  const hasWaterSources = state.hydrology.waterSources.filter(s => s.origin === 'manual').length > 0;
+
+  if (!hasBlobs && !hasWaterSources) return;
+
+  if (confirm('Clear all blobs and water sources? This cannot be undone.')) {
     markVoronoiDirty();
     state.template.blobs = [];
     state.selectedBlob = null;
     state.hoveredBlob = null;
+    // Also clear water sources
+    state.hydrology.waterSources = [];
+    state.hydrology.rivers = [];
+    state.hydrology.lakes = [];
+    state.hydrology.flowGrid = null;
+    state.selectedSource = null;
+    state.hoveredSource = null;
     render();
   }
 });
@@ -1653,6 +2143,12 @@ document.getElementById('show-contours').addEventListener('change', (e) => {
 // Voronoi cells toggle
 document.getElementById('show-cells')?.addEventListener('change', (e) => {
   state.showVoronoiCells = e.target.checked;
+  render();
+});
+
+// Water visibility toggle
+document.getElementById('show-water')?.addEventListener('change', (e) => {
+  state.showWater = e.target.checked;
   render();
 });
 
@@ -1751,39 +2247,12 @@ document.getElementById('micro-detail-amplitude').addEventListener('input', (e) 
 // Hydrology Panel Controls (Tab 3)
 // =============================================================================
 
-document.getElementById('auto-detect-sources')?.addEventListener('change', (e) => {
-  state.hydrology.config.autoDetect = e.target.checked;
-  state.hydrology.cacheKey = null;
-  render();
-});
-
-document.getElementById('river-carving')?.addEventListener('change', (e) => {
-  state.hydrology.config.carveEnabled = e.target.checked;
-  state.hydrology.cacheKey = null;
-  render();
-});
-
-document.getElementById('river-threshold')?.addEventListener('input', (e) => {
-  const value = parseInt(e.target.value);
-  state.hydrology.config.riverThreshold = value;
-  document.getElementById('river-threshold-value').textContent = value;
-  state.hydrology.cacheKey = null;
-  render();
-});
-
-document.getElementById('river-width-scale')?.addEventListener('input', (e) => {
-  const value = parseFloat(e.target.value);
-  state.hydrology.config.riverWidthScale = value;
-  document.getElementById('river-width-scale-value').textContent = value.toFixed(2);
-  state.hydrology.cacheKey = null;
-  render();
-});
-
 document.getElementById('carve-factor')?.addEventListener('input', (e) => {
   const value = parseFloat(e.target.value);
   state.hydrology.config.carveFactor = value;
   document.getElementById('carve-factor-value').textContent = value.toFixed(3);
   state.hydrology.cacheKey = null;
+  markElevationDirty(); // River carving affects elevation
   render();
 });
 
@@ -1792,32 +2261,16 @@ document.getElementById('show-flow-grid')?.addEventListener('change', (e) => {
   render();
 });
 
-document.getElementById('show-watersheds')?.addEventListener('change', (e) => {
-  state.hydrology.showWatersheds = e.target.checked;
-  render();
-});
-
-document.getElementById('show-water-sources')?.addEventListener('change', (e) => {
-  state.hydrology.showWaterSources = e.target.checked;
-  render();
-});
-
 document.getElementById('simulate-water')?.addEventListener('click', () => {
   runHydrologySimulation();
+  state.hydrology.simulationNeeded = false;
+  updateSimulateButtonState();
 });
 
 document.getElementById('tool-add-source')?.addEventListener('click', () => {
   document.querySelector('.tool.active')?.classList.remove('active');
   document.getElementById('tool-add-source').classList.add('active');
   state.currentTool = 'add-source';
-  canvas.style.cursor = 'crosshair';
-  render();
-});
-
-document.getElementById('tool-add-lake')?.addEventListener('click', () => {
-  document.querySelector('.tool.active')?.classList.remove('active');
-  document.getElementById('tool-add-lake').classList.add('active');
-  state.currentTool = 'add-lake';
   canvas.style.cursor = 'crosshair';
   render();
 });
@@ -1863,76 +2316,6 @@ propProfile?.addEventListener('change', (e) => {
   }
 });
 
-// Per-blob noise override controls
-document.getElementById('prop-noise-override-enabled')?.addEventListener('change', (e) => {
-  if (state.selectedBlob) {
-    if (e.target.checked) {
-      // Enable override with current global values as defaults
-      const defaults = state.template.defaults.noise;
-      state.selectedBlob.noiseOverride = {
-        roughness: defaults.roughness,
-        featureScale: defaults.featureScale
-      };
-    } else {
-      // Remove override
-      delete state.selectedBlob.noiseOverride;
-    }
-    paramNoiseCache.clear();
-    markElevationDirty();
-    updateNoiseOverrideUI();
-    render();
-  }
-});
-
-document.getElementById('prop-noise-roughness')?.addEventListener('input', (e) => {
-  if (state.selectedBlob && state.selectedBlob.noiseOverride) {
-    const value = parseFloat(e.target.value);
-    state.selectedBlob.noiseOverride.roughness = value;
-    document.getElementById('prop-noise-roughness-value').textContent = value.toFixed(2);
-    paramNoiseCache.clear();
-    markElevationDirty();
-    render();
-  }
-});
-
-document.getElementById('prop-noise-featureScale')?.addEventListener('input', (e) => {
-  if (state.selectedBlob && state.selectedBlob.noiseOverride) {
-    const value = parseFloat(e.target.value);
-    state.selectedBlob.noiseOverride.featureScale = value;
-    document.getElementById('prop-noise-featureScale-value').textContent = value.toFixed(2);
-    paramNoiseCache.clear();
-    markElevationDirty();
-    render();
-  }
-});
-
-function updateNoiseOverrideUI() {
-  const overrideEnabled = document.getElementById('prop-noise-override-enabled');
-  const roughnessSlider = document.getElementById('prop-noise-roughness');
-  const featureScaleSlider = document.getElementById('prop-noise-featureScale');
-  const roughnessValue = document.getElementById('prop-noise-roughness-value');
-  const featureScaleValue = document.getElementById('prop-noise-featureScale-value');
-
-  if (state.selectedBlob && state.selectedBlob.noiseOverride) {
-    overrideEnabled.checked = true;
-    roughnessSlider.value = state.selectedBlob.noiseOverride.roughness;
-    roughnessValue.textContent = state.selectedBlob.noiseOverride.roughness.toFixed(2);
-    featureScaleSlider.value = state.selectedBlob.noiseOverride.featureScale;
-    featureScaleValue.textContent = state.selectedBlob.noiseOverride.featureScale.toFixed(2);
-    roughnessSlider.disabled = false;
-    featureScaleSlider.disabled = false;
-  } else {
-    overrideEnabled.checked = false;
-    const defaults = state.template.defaults.noise;
-    roughnessSlider.value = defaults.roughness;
-    roughnessValue.textContent = defaults.roughness.toFixed(2);
-    featureScaleSlider.value = defaults.featureScale;
-    featureScaleValue.textContent = defaults.featureScale.toFixed(2);
-    roughnessSlider.disabled = true;
-    featureScaleSlider.disabled = true;
-  }
-}
-
 // Tool defaults panel
 document.getElementById('tool-elevation')?.addEventListener('input', (e) => {
   state.toolDefaults.elevation = parseFloat(e.target.value);
@@ -1952,9 +2335,11 @@ function updatePropertiesPanel() {
   const noSelection = document.getElementById('no-selection');
   const blobProps = document.getElementById('blob-props');
   const toolProps = document.getElementById('tool-props');
-  const noiseOverrides = document.getElementById('blob-noise-overrides');
 
-  if (state.selectedBlob) {
+  // Hide blob properties entirely on hydrology tab
+  const isHydrologyTab = state.currentTab === 'hydrology';
+
+  if (state.selectedBlob && !isHydrologyTab) {
     noSelection.style.display = 'none';
     blobProps.style.display = 'block';
     if (toolProps) toolProps.style.display = 'none';
@@ -1965,35 +2350,36 @@ function updatePropertiesPanel() {
     propRadiusValue.textContent = state.selectedBlob.radius.toFixed(2);
     propProfile.value = state.selectedBlob.profile;
 
-    // Show noise override panel only on Noise tab
-    if (noiseOverrides) {
-      noiseOverrides.style.display = (state.currentTab === 'noise') ? 'block' : 'none';
-      if (state.currentTab === 'noise') {
-        updateNoiseOverrideUI();
-      }
-    }
   } else {
-    noSelection.style.display = 'block';
     blobProps.style.display = 'none';
-    if (toolProps) toolProps.style.display = 'block';
-    if (noiseOverrides) noiseOverrides.style.display = 'none';
+
+    // On hydrology tab, hide the "no selection" and tool props too
+    if (isHydrologyTab) {
+      noSelection.style.display = 'none';
+      if (toolProps) toolProps.style.display = 'none';
+    } else {
+      noSelection.style.display = 'block';
+      if (toolProps) toolProps.style.display = 'block';
+    }
   }
 
-  // Update tool defaults UI
-  const toolElevation = document.getElementById('tool-elevation');
-  const toolRadius = document.getElementById('tool-radius');
-  const toolProfile = document.getElementById('tool-profile');
+  // Update tool defaults UI (only relevant on non-hydrology tabs)
+  if (!isHydrologyTab) {
+    const toolElevation = document.getElementById('tool-elevation');
+    const toolRadius = document.getElementById('tool-radius');
+    const toolProfile = document.getElementById('tool-profile');
 
-  if (toolElevation) {
-    toolElevation.value = state.toolDefaults.elevation;
-    document.getElementById('tool-elevation-value').textContent = state.toolDefaults.elevation.toFixed(2);
-  }
-  if (toolRadius) {
-    toolRadius.value = state.toolDefaults.radius;
-    document.getElementById('tool-radius-value').textContent = state.toolDefaults.radius.toFixed(2);
-  }
-  if (toolProfile) {
-    toolProfile.value = state.toolDefaults.profile;
+    if (toolElevation) {
+      toolElevation.value = state.toolDefaults.elevation;
+      document.getElementById('tool-elevation-value').textContent = state.toolDefaults.elevation.toFixed(2);
+    }
+    if (toolRadius) {
+      toolRadius.value = state.toolDefaults.radius;
+      document.getElementById('tool-radius-value').textContent = state.toolDefaults.radius.toFixed(2);
+    }
+    if (toolProfile) {
+      toolProfile.value = state.toolDefaults.profile;
+    }
   }
 }
 

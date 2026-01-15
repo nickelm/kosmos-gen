@@ -83,25 +83,6 @@
               </select>
             </label>
             <p class="hint">Shift+scroll: elevation | Ctrl+scroll: radius</p>
-
-            <!-- Noise Overrides (shown on Noise tab with blob selected) -->
-            <div id="blob-noise-overrides" style="display: none;">
-              <h4>Noise Override</h4>
-              <label class="toggle-label">
-                <input type="checkbox" id="prop-noise-override-enabled">
-                Use Custom Noise
-              </label>
-              <label>
-                Roughness:
-                <input type="range" id="prop-noise-roughness" min="0" max="1" step="0.05" value="0.3">
-                <span id="prop-noise-roughness-value">0.30</span>
-              </label>
-              <label>
-                Feature Scale:
-                <input type="range" id="prop-noise-featureScale" min="0.05" max="0.5" step="0.05" value="0.2">
-                <span id="prop-noise-featureScale-value">0.20</span>
-              </label>
-            </div>
           </div>
         </div>
 
@@ -164,31 +145,11 @@
 
         <!-- Hydrology Settings (Tab 3 only) -->
         <div id="hydrology-settings" style="display: none;">
-          <h3>Global Settings</h3>
-          <label class="toggle-label">
-            <input type="checkbox" id="auto-detect-sources">
-            Auto-detect Sources
-          </label>
-          <label class="toggle-label">
-            <input type="checkbox" id="river-carving" checked>
-            River Carving
-          </label>
-
           <h3>River Parameters</h3>
           <label>
-            River Threshold:
-            <input type="range" id="river-threshold" min="10" max="200" step="10" value="50">
-            <span id="river-threshold-value">50</span>
-          </label>
-          <label>
-            River Width:
-            <input type="range" id="river-width-scale" min="0.5" max="3" step="0.25" value="1">
-            <span id="river-width-scale-value">1.00</span>
-          </label>
-          <label>
             Carve Depth:
-            <input type="range" id="carve-factor" min="0" max="0.05" step="0.005" value="0.02">
-            <span id="carve-factor-value">0.020</span>
+            <input type="range" id="carve-factor" min="0" max="0.1" step="0.005" value="0.04">
+            <span id="carve-factor-value">0.040</span>
           </label>
 
           <h3>Display Options</h3>
@@ -196,16 +157,13 @@
             <input type="checkbox" id="show-flow-grid">
             Show Flow Grid
           </label>
-          <label class="toggle-label">
-            <input type="checkbox" id="show-watersheds">
-            Show Watersheds
-          </label>
-          <label class="toggle-label">
-            <input type="checkbox" id="show-water-sources" checked>
-            Show Water Sources
-          </label>
-
           <button id="simulate-water" class="prop-button" style="background: #2a5a3a; border-color: #3a7a4a;">Simulate Water</button>
+          <div id="hydrology-progress" class="progress-container" style="display: none;">
+            <div class="progress-bar">
+              <div class="progress-fill" id="hydrology-progress-fill"></div>
+            </div>
+            <span class="progress-text" id="hydrology-progress-text">Computing...</span>
+          </div>
         </div>
 
         <!-- Water Source Properties (shown when source selected) -->
@@ -223,17 +181,6 @@
           <button id="delete-source" class="prop-button danger">Delete Source</button>
         </div>
 
-        <!-- Lake Properties (shown when lake selected) -->
-        <div id="lake-props" style="display: none;">
-          <h3>Lake</h3>
-          <label>
-            Water Level:
-            <input type="range" id="prop-lake-level" min="0.1" max="0.5" step="0.01" value="0.15">
-            <span id="prop-lake-level-value">0.15</span>
-          </label>
-          <p id="lake-type-label">Type: <span id="prop-lake-type">Endorheic</span></p>
-          <button id="delete-lake" class="prop-button danger">Delete Lake</button>
-        </div>
       </aside>
     </main>
 
@@ -252,9 +199,6 @@
         <button id="tool-add-source" class="tool hydrology-tool" title="Add water source" style="display: none;">
           <span class="icon">&#x1F4A7;</span> Source
         </button>
-        <button id="tool-add-lake" class="tool hydrology-tool" title="Add lake marker" style="display: none;">
-          <span class="icon">&#x1F30A;</span> Lake
-        </button>
         <span class="tool-separator"></span>
         <button id="clear-canvas" class="tool-action" title="Clear all blobs">
           <span class="icon">&#x1F5D1;</span> Clear
@@ -264,6 +208,7 @@
         <label><input type="checkbox" id="show-elevation" checked> Elevation</label>
         <label><input type="checkbox" id="show-contours"> Contours</label>
         <label><input type="checkbox" id="show-cells" checked> Cells</label>
+        <label><input type="checkbox" id="show-water" checked> Water</label>
         <label>Seed: <input type="number" id="seed" value="42"></label>
         <button id="randomize">&#x1F3B2;</button>
       </div>

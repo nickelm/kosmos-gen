@@ -464,6 +464,66 @@ body {
   border-color: #40a4df;
 }
 
+/* Simulate Water button needs attention indicator */
+.prop-button.needs-simulation {
+  position: relative;
+  background: #4a3a2a !important;
+  border-color: #6a5a3a !important;
+  color: #ffc !important;
+  animation: pulse-attention 1.5s ease-in-out infinite;
+}
+
+.prop-button.needs-simulation::after {
+  content: '!';
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 18px;
+  height: 18px;
+  background: #e94560;
+  color: white;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+
+@keyframes pulse-attention {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
+/* Progress bar for hydrology simulation */
+.progress-container {
+  margin-top: 12px;
+}
+
+.progress-bar {
+  height: 8px;
+  background: #0f3460;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #40a4df, #4ecdc4);
+  width: 0%;
+  transition: width 0.15s ease-out;
+  border-radius: 4px;
+}
+
+.progress-text {
+  display: block;
+  font-size: 11px;
+  color: #888;
+  margin-top: 4px;
+  text-align: center;
+}
+
 /* =============================================================================
    Responsive / Touch Layout
    ============================================================================= */

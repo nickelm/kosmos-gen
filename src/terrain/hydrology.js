@@ -21,9 +21,57 @@ import {
 } from './flowgrid.js';
 import { detectWaterSources, mergeNearbySources } from './watersources.js';
 import { detectPotentialLakes, computeLakeFill, extractLakeBoundary, classifyLakeAsEndorheic } from './lakes.js';
+import { D8_DIRECTIONS } from './flowgrid.js';
 
 // Sea level constant (from elevation.js)
 export const SEA_LEVEL = 0.1;
+
+/**
+ * Find connected sink cells starting from a given cell index
+ * Used to determine lake extent at river termination points
+ * @param {Object} flowGrid - Flow grid
+ * @param {number} startIdx - Starting cell index
+ * @returns {Array} Array of connected sink cell indices
+ */
+function findConnectedSinkCells(flowGrid, startIdx) {
+  const visited = new Set();
+  const result = [];
+  const queue = [startIdx];
+
+  while (queue.length > 0) {
+    const idx = queue.shift();
+    if (visited.has(idx)) continue;
+
+    // Check if this cell is a sink or has very low slope
+    if (flowGrid.flowDirection[idx] !== SINK_DIRECTION) {
+      // Also include cells that flow into sinks (low accumulation neighbors)
+      continue;
+    }
+
+    visited.add(idx);
+    result.push(idx);
+
+    // Check all 8 neighbors
+    const { cellX, cellZ } = indexToCell(flowGrid, idx);
+    for (const { dx, dz } of D8_DIRECTIONS) {
+      const nx = cellX + dx;
+      const nz = cellZ + dz;
+      if (!isValidCell(flowGrid, nx, nz)) continue;
+
+      const neighborIdx = cellIndex(flowGrid, nx, nz);
+      if (!visited.has(neighborIdx)) {
+        queue.push(neighborIdx);
+      }
+    }
+  }
+
+  // If no sink cells found, at least include the starting cell
+  if (result.length === 0) {
+    result.push(startIdx);
+  }
+
+  return result;
+}
 
 // Default hydrology configuration
 export const DEFAULT_HYDROLOGY_CONFIG = {
@@ -76,20 +124,51 @@ export function generateHydrology(world, options = {}) {
   const meanderSeed = deriveSeed(seed, 'meander');
   const meanderNoise = createSimplexNoise(meanderSeed);
 
+  // Track basins where rivers terminate (will become lakes)
+  const basinLakes = [];
+
   for (const source of waterSources) {
     if (source.enabled === false) continue;
 
-    const river = traceRiverFromPoint(flowGrid, source.x, source.z, config, `river_${source.id}`);
+    // Pass source's flowRate to scale river width
+    const river = traceRiverFromPoint(flowGrid, source.x, source.z, config, `river_${source.id}`, source.flowRate);
     if (river && river.vertices.length >= 2) {
       river.sourceId = source.id;
+      river.flowRate = source.flowRate; // Store for reference
       // Apply meandering to make rivers organic
       applyMeandering(river, meanderNoise, config);
       rivers.push(river);
+
+      // If river ends at a basin (not coast), create a lake there
+      if (river.termination === 'basin' && river.sinkLocation) {
+        const sink = river.sinkLocation;
+        // Find sink cells around this location for lake fill computation
+        const sinkCells = findConnectedSinkCells(flowGrid, sink.cellIdx);
+        basinLakes.push({
+          id: `lake_basin_${source.id}`,
+          x: sink.x,
+          z: sink.z,
+          waterLevel: sink.elevation + 0.02, // Lake surface slightly above terrain
+          origin: 'river_basin',
+          inflowRiverId: river.id,
+          cellIdx: sink.cellIdx,
+          sinkCells: sinkCells,
+          area: sinkCells.length * config.gridResolution * config.gridResolution
+        });
+      }
     }
   }
 
-  // Step 5: Detect lakes
+  // Step 5: Detect lakes (manual + auto-detected + basin lakes from rivers)
   let lakes = world.lakes?.filter(l => l.origin === 'manual') || [];
+
+  // Add lakes created at river basin endpoints
+  for (const basinLake of basinLakes) {
+    computeLakeFill(flowGrid, basinLake);
+    basinLake.boundary = extractLakeBoundary(world, basinLake);
+    lakes.push(basinLake);
+  }
+
   if (config.autoDetect) {
     const autoLakes = detectPotentialLakes(flowGrid, config.lakeMinArea);
     for (const lake of autoLakes) {
@@ -99,20 +178,30 @@ export function generateHydrology(world, options = {}) {
     lakes = [...lakes, ...autoLakes];
   }
 
-  // Step 6: Handle lake overflow - spawn outflow rivers
+  // Step 6: Handle lake overflow - spawn outflow rivers that continue to sea
   for (const lake of lakes) {
     if (lake.spillPoint && !lake.endorheic) {
-      const outflowRiver = traceRiverFromPoint(
-        flowGrid,
-        lake.spillPoint.x,
-        lake.spillPoint.z,
-        config,
-        `lake_${lake.id}_outflow`
-      );
-      if (outflowRiver) {
-        outflowRiver.sourceLakeId = lake.id;
-        lake.outflowRiverId = outflowRiver.id;
-        rivers.push(outflowRiver);
+      // Check if spillpoint is above sea level (otherwise lake drains to sea directly)
+      if (lake.spillPoint.elevation > SEA_LEVEL) {
+        const outflowRiver = traceRiverFromPoint(
+          flowGrid,
+          lake.spillPoint.x,
+          lake.spillPoint.z,
+          config,
+          `lake_${lake.id}_outflow`
+        );
+        if (outflowRiver && outflowRiver.vertices.length >= 2) {
+          outflowRiver.sourceLakeId = lake.id;
+          lake.outflowRiverId = outflowRiver.id;
+          applyMeandering(outflowRiver, meanderNoise, config);
+          rivers.push(outflowRiver);
+
+          // Link the original river to this lake
+          const inflowRiver = rivers.find(r => r.id === lake.inflowRiverId);
+          if (inflowRiver) {
+            inflowRiver.terminatingLakeId = lake.id;
+          }
+        }
       }
     }
 
@@ -137,14 +226,19 @@ export function generateHydrology(world, options = {}) {
  * @param {number} startIdx - Starting cell index
  * @param {Object} config - Hydrology configuration
  * @param {number} riverId - River ID number
+ * @param {number} flowRate - Source flow rate (0.1-1.0) to scale river width
  * @returns {Object|null} River object or null
  */
-function traceRiverFromCell(flowGrid, startIdx, config, riverId) {
+function traceRiverFromCell(flowGrid, startIdx, config, riverId, flowRate = 0.5) {
   const vertices = [];
   const visited = new Set();
   let currentIdx = startIdx;
+  let termination = 'coast';
+  let sinkLocation = null;
+  let stepsWithoutProgress = 0;
+  const maxSteps = flowGrid.width * flowGrid.height; // Prevent infinite loops
 
-  while (currentIdx !== null && !visited.has(currentIdx)) {
+  while (currentIdx !== null && !visited.has(currentIdx) && vertices.length < maxSteps) {
     visited.add(currentIdx);
 
     const { cellX, cellZ } = indexToCell(flowGrid, currentIdx);
@@ -152,8 +246,8 @@ function traceRiverFromCell(flowGrid, startIdx, config, riverId) {
     const elevation = flowGrid.elevation[currentIdx];
     const flow = flowGrid.accumulation[currentIdx];
 
-    // Compute width from flow
-    const width = computeRiverWidth(flow, config);
+    // Compute width from flow, scaled by source's flowRate
+    const width = computeRiverWidth(flow, config, flowRate);
 
     // Compute carve depth
     const carveDepth = config.carveEnabled
@@ -162,11 +256,47 @@ function traceRiverFromCell(flowGrid, startIdx, config, riverId) {
 
     vertices.push({ x, z, elevation, flow, width, carveDepth });
 
-    // Stop if we've reached sea level
-    if (elevation <= SEA_LEVEL) break;
+    // Stop if we've reached sea level (river enters the ocean)
+    if (elevation <= SEA_LEVEL) {
+      termination = 'coast';
+      break;
+    }
 
     // Follow flow direction
-    currentIdx = getDownstreamCell(flowGrid, currentIdx);
+    const nextIdx = getDownstreamCell(flowGrid, currentIdx);
+
+    // If no downstream (sink or grid boundary), check if we should terminate
+    if (nextIdx === null) {
+      // Check if we're at a grid boundary - if so, this might be an edge case
+      const atBoundary = cellX <= 0 || cellX >= flowGrid.width - 1 ||
+                         cellZ <= 0 || cellZ >= flowGrid.height - 1;
+
+      if (atBoundary && elevation <= SEA_LEVEL + 0.05) {
+        // Close enough to coast at boundary, treat as reaching coast
+        termination = 'coast';
+      } else {
+        // True basin/sink - will form a lake
+        termination = 'basin';
+        sinkLocation = { x, z, elevation, cellIdx: currentIdx };
+      }
+      break;
+    }
+
+    // Check for progress (elevation should generally decrease)
+    const nextElevation = flowGrid.elevation[nextIdx];
+    if (nextElevation >= elevation) {
+      stepsWithoutProgress++;
+      // If we've been flat for too long, we're in a depression
+      if (stepsWithoutProgress > 50) {
+        termination = 'basin';
+        sinkLocation = { x, z, elevation, cellIdx: currentIdx };
+        break;
+      }
+    } else {
+      stepsWithoutProgress = 0;
+    }
+
+    currentIdx = nextIdx;
   }
 
   if (vertices.length < 2) return null;
@@ -176,8 +306,9 @@ function traceRiverFromCell(flowGrid, startIdx, config, riverId) {
     sourceId: null,
     vertices,
     tributaryIds: [],
-    termination: 'coast',
-    terminatingLakeId: null
+    termination,
+    terminatingLakeId: null,
+    sinkLocation // Will be set if river ended at a basin
   };
 }
 
@@ -188,14 +319,15 @@ function traceRiverFromCell(flowGrid, startIdx, config, riverId) {
  * @param {number} z - World Z coordinate
  * @param {Object} config - Hydrology configuration
  * @param {string} id - River ID
+ * @param {number} flowRate - Source flow rate (0.1-1.0) to scale river width
  * @returns {Object|null} River object or null
  */
-function traceRiverFromPoint(flowGrid, x, z, config, id) {
+function traceRiverFromPoint(flowGrid, x, z, config, id, flowRate = 0.5) {
   const { cellX, cellZ } = worldToCell(flowGrid, x, z);
   if (!isValidCell(flowGrid, cellX, cellZ)) return null;
 
   const startIdx = cellIndex(flowGrid, cellX, cellZ);
-  const river = traceRiverFromCell(flowGrid, startIdx, config, id);
+  const river = traceRiverFromCell(flowGrid, startIdx, config, id, flowRate);
 
   if (river) {
     river.id = id;
@@ -206,13 +338,17 @@ function traceRiverFromPoint(flowGrid, x, z, config, id) {
 
 /**
  * Compute river width from flow accumulation
+ * Width depends only on flow accumulation and the source's flowRate
  * @param {number} flow - Flow accumulation value
  * @param {Object} config - Hydrology configuration
+ * @param {number} flowRate - Source flow rate (0.1-1.0) to scale width
  * @returns {number} River width in world units
  */
-function computeRiverWidth(flow, config) {
-  const { riverThreshold, baseRiverWidth, riverWidthScale } = config;
-  return baseRiverWidth * Math.sqrt(flow / riverThreshold) * riverWidthScale;
+function computeRiverWidth(flow, config, flowRate = 0.5) {
+  const { riverThreshold, baseRiverWidth } = config;
+  // Width = base * sqrt(flow) * flowRate
+  // flowRate acts as the per-river width multiplier (controlled via source)
+  return baseRiverWidth * Math.sqrt(flow / riverThreshold) * flowRate * 2;
 }
 
 /**

@@ -1,6 +1,6 @@
 /**
- * River carving - modifies elevation along river paths
- * Creates realistic river valleys in the terrain
+ * River and lake carving - modifies elevation along river paths and lake basins
+ * Creates realistic river valleys and lake beds in the terrain
  */
 
 import { findNearestRiverPoint } from './hydrology.js';
@@ -20,18 +20,16 @@ export function sampleRiverCarving(world, x, z) {
   const config = world.hydrologyConfig || {};
   if (config.carveEnabled === false) return 0;
 
-  const rivers = world.rivers || [];
-  if (rivers.length === 0) return 0;
-
-  let totalCarving = 0;
   let maxCarving = 0;
 
+  // River carving
+  const rivers = world.rivers || [];
   for (const river of rivers) {
     if (!river.vertices || river.vertices.length < 2) continue;
 
     const nearest = findNearestRiverPoint(river, x, z);
 
-    // Only carve within influence radius (1.5x river width)
+    // Only carve within influence radius (2x river width)
     const influenceRadius = nearest.width * 2.0;
     if (nearest.distance >= influenceRadius) continue;
 
@@ -44,8 +42,81 @@ export function sampleRiverCarving(world, x, z) {
     maxCarving = Math.max(maxCarving, carving);
   }
 
+  // Lake carving - carve out lake basins
+  const lakes = world.lakes || [];
+  for (const lake of lakes) {
+    if (!lake.boundary || lake.boundary.length < 3) continue;
+    if (!lake.waterLevel) continue;
+
+    // Check if point is inside lake boundary
+    if (isPointInLakeBoundary(x, z, lake.boundary)) {
+      // Carve down to water level with some depth
+      const lakeCarveDepth = config.carveFactor * 2 || 0.04;
+      maxCarving = Math.max(maxCarving, lakeCarveDepth);
+    } else {
+      // Check distance to lake boundary for smooth edge carving
+      const distToBoundary = distanceToPolygon(x, z, lake.boundary);
+      const edgeRadius = 0.05; // Smooth transition zone
+      if (distToBoundary < edgeRadius) {
+        const t = distToBoundary / edgeRadius;
+        const falloff = Math.exp(-t * t * 2);
+        const lakeCarveDepth = (config.carveFactor * 2 || 0.04) * falloff;
+        maxCarving = Math.max(maxCarving, lakeCarveDepth);
+      }
+    }
+  }
+
   // Return as negative (to lower elevation)
   return -maxCarving;
+}
+
+/**
+ * Check if a point is inside a lake boundary polygon
+ */
+function isPointInLakeBoundary(x, z, boundary) {
+  if (!boundary || boundary.length < 3) return false;
+
+  let inside = false;
+  for (let i = 0, j = boundary.length - 1; i < boundary.length; j = i++) {
+    const xi = boundary[i].x, zi = boundary[i].z;
+    const xj = boundary[j].x, zj = boundary[j].z;
+
+    if (((zi > z) !== (zj > z)) &&
+        (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/**
+ * Calculate minimum distance from point to polygon boundary
+ */
+function distanceToPolygon(x, z, polygon) {
+  let minDist = Infinity;
+
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+
+    // Distance to line segment
+    const dx = p2.x - p1.x;
+    const dz = p2.z - p1.z;
+    const lenSq = dx * dx + dz * dz;
+
+    let t = 0;
+    if (lenSq > 0) {
+      t = Math.max(0, Math.min(1, ((x - p1.x) * dx + (z - p1.z) * dz) / lenSq));
+    }
+
+    const closestX = p1.x + t * dx;
+    const closestZ = p1.z + t * dz;
+    const dist = Math.sqrt((x - closestX) ** 2 + (z - closestZ) ** 2);
+
+    minDist = Math.min(minDist, dist);
+  }
+
+  return minDist;
 }
 
 /**
