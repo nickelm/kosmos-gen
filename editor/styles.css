@@ -9,6 +9,7 @@ body {
   background: #1a1a2e;
   color: #eee;
   height: 100vh;
+  height: 100dvh; /* Dynamic viewport height - works correctly with Safari address bar */
   overflow: hidden;
   overscroll-behavior: none;
   -webkit-overflow-scrolling: auto;
@@ -18,6 +19,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh; /* Dynamic viewport height - accounts for mobile browser chrome */
 }
 
 /* Tabs */
@@ -202,6 +204,7 @@ body {
   justify-content: space-between;
   align-items: center;
   padding: 8px 16px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom)); /* Account for iPad home indicator */
   background: #16213e;
   border-top: 1px solid #0f3460;
 }
