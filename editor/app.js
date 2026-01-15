@@ -21,6 +21,16 @@ import { generateHydrology, DEFAULT_HYDROLOGY_CONFIG } from '../src/terrain/hydr
 import { createManualSource } from '../src/terrain/watersources.js';
 import { createManualLake } from '../src/terrain/lakes.js';
 
+// Touch/gesture modules
+import {
+  createInteractionHandler,
+  hitTestBlobCenter as touchHitTestCenter,
+  hitTestBlobRadius as touchHitTestRadius,
+  resizeOverlay
+} from './canvas/interaction.js';
+import { screenToWorld, worldToScreen, copyViewport, zoom as viewportZoom, pan as viewportPan } from './canvas/viewport.js';
+import { createPropertiesPanel } from './panels/properties.js';
+
 // =============================================================================
 // State
 // =============================================================================
@@ -301,14 +311,23 @@ function regenerateDerivedFeatures() {
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const overlayCanvas = document.getElementById('overlay-canvas');
+const overlayCtx = overlayCanvas?.getContext('2d');
 
 function resizeCanvas() {
-  const rect = canvas.getBoundingClientRect();
+  const container = document.getElementById('canvas-container');
+  const rect = container ? container.getBoundingClientRect() : canvas.getBoundingClientRect();
   const width = Math.round(rect.width);
   const height = Math.round(rect.height);
 
   canvas.width = width;
   canvas.height = height;
+
+  // Resize overlay canvas to match
+  if (overlayCanvas) {
+    overlayCanvas.width = width;
+    overlayCanvas.height = height;
+  }
 
   state.view.offsetX = width / 2;
   state.view.offsetY = height / 2;
@@ -993,13 +1012,123 @@ function drawFlowGrid() {
 // Interaction
 // =============================================================================
 
+// Flag to track if touch handler is active (to avoid duplicate handling)
+let touchHandlerActive = false;
+
+// Create touch interaction handler
+// Note: The interaction module uses 'scale' but our state uses 'zoom'
+// We adapt the interface here
+const touchHandler = createInteractionHandler({
+  canvas,
+  overlayCanvas,
+  getViewport: () => ({
+    offsetX: state.view.offsetX,
+    offsetY: state.view.offsetY,
+    scale: state.view.zoom
+  }),
+  setViewport: (vp) => {
+    state.view.offsetX = vp.offsetX;
+    state.view.offsetY = vp.offsetY;
+    state.view.zoom = vp.scale;
+  },
+  getBlobs: () => state.template.blobs,
+  onTap: (e) => {
+    // Handle tap based on current tool
+    if (state.currentTool === 'add') {
+      const newBlob = createBlob(
+        generateBlobId(state.template.blobs.length),
+        e.worldX,
+        e.worldZ,
+        state.toolDefaults.elevation,
+        state.toolDefaults.radius,
+        state.toolDefaults.profile
+      );
+      state.template.blobs.push(newBlob);
+      state.selectedBlob = newBlob;
+      state.toolDefaults.elevation = newBlob.elevation;
+      state.toolDefaults.radius = newBlob.radius;
+      state.toolDefaults.profile = newBlob.profile;
+      markVoronoiDirty();
+      render();
+    } else if (state.currentTool === 'select') {
+      const hitBlob = touchHitTestCenter(state.template.blobs, state.view, e.x, e.y) ||
+                      touchHitTestRadius(state.template.blobs, state.view, e.x, e.y);
+      state.selectedBlob = hitBlob;
+      if (hitBlob) {
+        state.toolDefaults.elevation = hitBlob.elevation;
+        state.toolDefaults.radius = hitBlob.radius;
+        state.toolDefaults.profile = hitBlob.profile;
+      }
+      render();
+    } else if (state.currentTool === 'delete') {
+      const hitBlob = touchHitTestCenter(state.template.blobs, state.view, e.x, e.y) ||
+                      touchHitTestRadius(state.template.blobs, state.view, e.x, e.y);
+      if (hitBlob) {
+        const index = state.template.blobs.indexOf(hitBlob);
+        if (index !== -1) {
+          state.template.blobs.splice(index, 1);
+          if (state.selectedBlob === hitBlob) {
+            state.selectedBlob = null;
+          }
+          markVoronoiDirty();
+          render();
+        }
+      }
+    } else if (state.currentTool === 'add-source') {
+      const source = createManualSource(e.worldX, e.worldZ, {
+        id: `source_manual_${Date.now()}`,
+        flowRate: 0.5
+      });
+      state.hydrology.waterSources.push(source);
+      state.selectedSource = source;
+      runHydrologySimulation();
+    } else if (state.currentTool === 'add-lake') {
+      const lake = createManualLake(e.worldX, e.worldZ, {
+        id: `lake_manual_${Date.now()}`,
+        waterLevel: 0.15,
+        area: 0.01
+      });
+      state.hydrology.lakes.push(lake);
+      state.selectedLake = lake;
+      runHydrologySimulation();
+    }
+  },
+  onDragStart: ({ target, type }) => {
+    state.selectedBlob = target;
+    state.toolDefaults.elevation = target.elevation;
+    state.toolDefaults.radius = target.radius;
+    state.toolDefaults.profile = target.profile;
+  },
+  onDragMove: ({ target, worldX, worldZ, radius }) => {
+    // During drag, we don't update the model - outline is shown on overlay
+  },
+  onDragEnd: ({ target, committed }) => {
+    if (committed) {
+      markVoronoiDirty();
+      state.toolDefaults.radius = target.radius;
+    }
+  },
+  onViewportChange: () => {
+    // Viewport changed, just render
+  },
+  render
+});
+
+// Attach touch handler
+touchHandler.attach();
+touchHandlerActive = true;
+
+// Legacy mouse event handlers (still used for modifier keys like shift+wheel, ctrl+wheel)
 canvas.addEventListener('mousedown', onMouseDown);
 canvas.addEventListener('mousemove', onMouseMove);
 canvas.addEventListener('mouseup', onMouseUp);
 canvas.addEventListener('contextmenu', onContextMenu);
-canvas.addEventListener('wheel', onWheel);
+canvas.addEventListener('wheel', onWheel, { passive: false });
 
 function onMouseDown(e) {
+  // Skip if touch handler is processing a gesture
+  if (touchHandler.isGesturing()) return;
+
   const mouse = getMousePos(e);
 
   // Middle mouse button for panning
@@ -1176,6 +1305,9 @@ function onKeyDown(e) {
 document.addEventListener('keydown', onKeyDown);
 
 function onWheel(e) {
+  // Only handle modifier key wheel events here; basic zoom is handled by touch handler
+  if (!e.shiftKey && !e.ctrlKey) return;
+
   e.preventDefault();
   const mouse = getMousePos(e);
 
@@ -1209,21 +1341,8 @@ function onWheel(e) {
       state.toolDefaults.radius = blob.radius;
       markElevationDirty();
       render();
-      return;
     }
   }
-
-  // Normal wheel: zoom
-  const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-  const worldBefore = canvasToWorld(mouse.x, mouse.y);
-  state.view.zoom *= zoomFactor;
-  state.view.zoom = Math.max(50, Math.min(2000, state.view.zoom));
-  const worldAfter = canvasToWorld(mouse.x, mouse.y);
-
-  state.view.offsetX += (worldAfter.x - worldBefore.x) * state.view.zoom;
-  state.view.offsetY += (worldAfter.z - worldBefore.z) * state.view.zoom;
-
-  render();
 }
 
 function updateCursor() {
@@ -1632,4 +1751,29 @@ function syncNoisePanelUI() {
 resizeCanvas();
 syncNoisePanelUI();
 updateTabUI();
-console.log('kosmos-gen editor initialized (blob mode)');
+
+// =============================================================================
+// Properties Panel Setup
+// =============================================================================
+
+const panelElement = document.getElementById('panel');
+const panelToggle = document.getElementById('panel-toggle');
+
+const propertiesPanel = createPropertiesPanel({
+  panel: panelElement,
+  toggleButton: panelToggle,
+  onToggle: (expanded) => {
+    console.log('Panel', expanded ? 'expanded' : 'collapsed');
+  }
+});
+
+propertiesPanel.attach();
+
+// Update panel when selection changes
+const originalUpdatePropertiesPanel = updatePropertiesPanel;
+window.updatePropertiesPanel = function() {
+  originalUpdatePropertiesPanel();
+  propertiesPanel.updateSelection(!!state.selectedBlob);
+};
+
+console.log('kosmos-gen editor initialized (blob mode with touch support)');
