@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>kosmos-gen Visualizer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="sidebar-section">
+        <h2>Controls</h2>
+        <div id="controls"></div>
+      </div>
+      <div class="sidebar-section">
+        <h2>Stages</h2>
+        <div id="stage-panel"></div>
+      </div>
+      <div class="sidebar-section">
+        <h2>Layers</h2>
+        <div id="layer-panel"></div>
+      </div>
+      <div class="sidebar-section">
+        <h2>Terrain</h2>
+        <div id="terrain-params"></div>
+      </div>
+      <div class="sidebar-section" id="view3d-section" style="display: none;">
+        <h2>3D Options</h2>
+        <div id="view3d-controls"></div>
+      </div>
+    </aside>
+
+    <main id="viewport">
+      <canvas id="canvas"></canvas>
+      <div id="canvas-3d"></div>
+    </main>
+
+    <footer id="info-bar">
+      <span id="info-seed">Seed: --</span>
+      <span id="info-archetype">Archetype: --</span>
+      <span id="info-resolution">Resolution: --</span>
+      <span id="info-timing">Time: --</span>
+    </footer>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

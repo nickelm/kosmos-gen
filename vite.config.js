@@ -2,11 +2,17 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 
 export default defineConfig({
-  root: 'editor',
+  root: '.',
   base: '/kosmos-gen/',
   build: {
-    outDir: '../dist',
+    outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        editor: resolve(__dirname, 'editor/index.html'),
+        visualizer: resolve(__dirname, 'visualizer/index.html'),
+      },
+    },
   },
   resolve: {
     alias: {
@@ -14,6 +20,6 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5174,  // Different from golemcraft (5173)
+    port: 5174,
   },
 });

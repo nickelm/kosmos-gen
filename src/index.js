@@ -8,6 +8,7 @@
 export { seededRandom, deriveSeed } from './core/seeds.js';
 export { createSimplexNoise, createFBmNoise, unipolar } from './core/noise.js';
 export { createDomainWarp, createCachedDomainWarp, DEFAULT_WARP_CONFIG } from './core/warp.js';
+export { lerp, smoothstep, clamp, distance, normalize, remap, pointToSegmentDistance } from './core/math.js';
 
 // Geometry
 export {

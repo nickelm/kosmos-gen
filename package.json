@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "vis": "vite --open /visualizer/index.html",
+    "editor": "vite --open /editor/index.html"
   },
   "keywords": [
     "procedural-generation",
@@ -19,7 +21,8 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "d3-delaunay": "^6.0.4"
+    "d3-delaunay": "^6.0.4",
+    "three": "^0.182.0"
   },
   "devDependencies": {
     "vite": "^5.0.0"
