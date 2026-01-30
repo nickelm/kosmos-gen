@@ -113,6 +113,9 @@ export {
 export {
   sampleRiverCarving,
   computeRiverCarvingField,
+  computeEnhancedCarveProfile,
+  ensureRiverSDF,
+  sampleRiverSDF,
   isInRiver,
   getRiverInfoAt
 } from './terrain/rivercarving.js';

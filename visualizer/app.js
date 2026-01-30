@@ -136,7 +136,7 @@ function doGenerate(seed) {
 
       // Update 3D view
       if (state.viewMode === '3d' && result.elevation) {
-        view3d.updateTerrain(result.elevation, result.biomes, result.params);
+        view3d.updateTerrain(result.elevation, result.biomes, result.params, result.hydrology);
       }
 
       if (stagePanel) {
@@ -217,6 +217,7 @@ initViewToggle(document.getElementById('controls'), {
           state.generatedData.elevation,
           state.generatedData.biomes,
           state.generatedData.params,
+          state.generatedData.hydrology,
         );
       }
     } else {

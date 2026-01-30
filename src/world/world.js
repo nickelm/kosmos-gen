@@ -19,7 +19,18 @@ export const DEFAULT_HYDROLOGY_CONFIG = {
   lakeMinArea: 0.001,       // Min area for auto-detected lakes
   gridResolution: 0.01,     // Flow grid cell size
   baseRiverWidth: 0.005,    // Base river width at threshold flow
-  riverWidthScale: 1.0      // River width multiplier
+  riverWidthScale: 1.0,     // River width multiplier
+  // Valley carving profile
+  valleyWidthMultiplier: 6, // Valley extends to width * N from river center
+  floodplainMultiplier: 3,  // Floodplain extends to width * N
+  // Organic shoreline noise
+  shoreNoiseFrequency: 40,  // Noise frequency for zone boundary jitter
+  shoreNoiseAmplitude: 0.3, // Max jitter as fraction of zone width
+  widthNoiseFrequency: 25,  // Noise frequency for width variation
+  widthNoiseAmplitude: 0.2, // Max width variation fraction
+  // Meander erosion
+  meanderErosionStrength: 0.3,  // How much curvature increases carve depth
+  meanderWideningStrength: 0.15 // How much curvature increases width
 };
 
 export class World {

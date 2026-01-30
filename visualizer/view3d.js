@@ -2,7 +2,7 @@
  * 3D terrain viewer
  *
  * Three.js scene with orbit controls, heightfield mesh, water plane,
- * and directional + ambient lighting.
+ * river ribbons, lake surfaces, and directional + ambient lighting.
  */
 
 import * as THREE from 'three';
@@ -17,6 +17,16 @@ import { getBiomeColorNormalized } from './biome-colors.js';
  */
 const DEFAULT_HEIGHT_SCALE = 0.3;
 
+/** Sand/beach color for underwater and shoreline terrain */
+const SAND_COLOR = { r: 0.82, g: 0.72, b: 0.55 };
+
+/** How far above water level (in world elevation units) to apply beach coloring */
+const BEACH_BAND = 0.015;
+
+/** SDF distance threshold (in world units) for sandy river/lake bed coloring */
+const RIVER_SAND_RADIUS = 0.025;
+const LAKE_SAND_RADIUS = 0.015;
+
 export class View3D {
   /**
    * @param {HTMLElement} container - DOM element to host the WebGL canvas
@@ -30,14 +40,21 @@ export class View3D {
 
     // Stored for exaggeration updates without full rebuild
     this.elevationData = null;
+    this.hydrologyData = null;
     this.terrainMesh = null;
     this.terrainMaterial = null;
+
+    // River and lake water surface meshes
+    this.riverMeshes = [];
+    this.lakeMeshes = [];
+    this.inlandWaterMaterial = null;
 
     this._initRenderer();
     this._initCamera();
     this._initControls();
     this._initLighting();
     this._initWaterPlane();
+    this._initInlandWaterMaterial();
     this._animate();
   }
 
@@ -101,6 +118,19 @@ export class View3D {
     this.scene.add(this.waterMesh);
   }
 
+  _initInlandWaterMaterial() {
+    this.inlandWaterMaterial = new THREE.MeshLambertMaterial({
+      color: 0x2288cc,
+      transparent: true,
+      opacity: 0.5,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -4,
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Animation
   // ---------------------------------------------------------------------------
@@ -122,12 +152,14 @@ export class View3D {
    * @param {{ width: number, height: number, data: Float32Array }} elevation
    * @param {{ width: number, height: number, data: Uint8Array } | null} biomes
    * @param {{ seaLevel?: number }} params
+   * @param {Object | null} hydrology - { rivers, lakes, riverSDF, lakeSDF, width, height }
    */
-  updateTerrain(elevation, biomes, params) {
+  updateTerrain(elevation, biomes, params, hydrology) {
     if (!elevation) return;
 
     // Store for exaggeration updates
     this.elevationData = elevation;
+    this.hydrologyData = hydrology || null;
     if (params && params.seaLevel !== undefined) {
       this.seaLevel = params.seaLevel;
     }
@@ -158,24 +190,9 @@ export class View3D {
       }
     }
 
-    // Build vertex colors
+    // Build vertex colors (with sandy/beach coloring)
     const colors = new Float32Array(vertexCount * 3);
-    if (biomes && biomes.data && biomes.data.length === vertexCount) {
-      for (let i = 0; i < vertexCount; i++) {
-        const c = getBiomeColorNormalized(biomes.data[i]);
-        colors[i * 3] = c.r;
-        colors[i * 3 + 1] = c.g;
-        colors[i * 3 + 2] = c.b;
-      }
-    } else {
-      // Fallback: grayscale from elevation
-      for (let i = 0; i < vertexCount; i++) {
-        const v = data[i];
-        colors[i * 3] = v;
-        colors[i * 3 + 1] = v;
-        colors[i * 3 + 2] = v;
-      }
-    }
+    this._buildVertexColors(colors, elevation, biomes, hydrology);
 
     // Build triangle index buffer
     const indexCount = (width - 1) * (height - 1) * 6;
@@ -216,7 +233,326 @@ export class View3D {
 
     // Update water plane
     this.waterMesh.position.y = this.seaLevel * this.baseHeightScale * this.heightExaggeration;
+
+    // Build river and lake water surfaces
+    this._clearInlandWater();
+    if (hydrology) {
+      this._buildRiverMeshes(hydrology.rivers);
+      this._buildLakeMeshes(hydrology.lakes);
+    }
   }
+
+  /**
+   * Build vertex colors with sandy/beach coloring for underwater and shoreline areas.
+   */
+  _buildVertexColors(colors, elevation, biomes, hydrology) {
+    const { width, height, data } = elevation;
+    const vertexCount = width * height;
+
+    // First pass: base biome colors
+    if (biomes && biomes.data && biomes.data.length === vertexCount) {
+      for (let i = 0; i < vertexCount; i++) {
+        const c = getBiomeColorNormalized(biomes.data[i]);
+        colors[i * 3] = c.r;
+        colors[i * 3 + 1] = c.g;
+        colors[i * 3 + 2] = c.b;
+      }
+    } else {
+      for (let i = 0; i < vertexCount; i++) {
+        const v = data[i];
+        colors[i * 3] = v;
+        colors[i * 3 + 1] = v;
+        colors[i * 3 + 2] = v;
+      }
+    }
+
+    // Second pass: blend toward sandy color for underwater and near-shore areas
+    const seaLevel = this.seaLevel;
+
+    // Ocean shoreline sandy coloring
+    for (let i = 0; i < vertexCount; i++) {
+      const elev = data[i];
+
+      // Underwater (below sea level): full sand
+      if (elev < seaLevel) {
+        const depth = seaLevel - elev;
+        // Stronger sand color in shallow water, blends to darker in deep
+        const t = Math.min(1.0, depth / 0.08);
+        const sandBlend = 1.0 - t * 0.3; // Even deep water stays sandy
+        colors[i * 3]     = colors[i * 3]     * (1 - sandBlend) + SAND_COLOR.r * sandBlend;
+        colors[i * 3 + 1] = colors[i * 3 + 1] * (1 - sandBlend) + SAND_COLOR.g * sandBlend;
+        colors[i * 3 + 2] = colors[i * 3 + 2] * (1 - sandBlend) + SAND_COLOR.b * sandBlend;
+        continue;
+      }
+
+      // Beach band just above sea level
+      if (elev < seaLevel + BEACH_BAND) {
+        const t = (elev - seaLevel) / BEACH_BAND; // 0 at water, 1 at top of band
+        const sandBlend = 1.0 - t; // Full sand at waterline, fading out
+        colors[i * 3]     = colors[i * 3]     * (1 - sandBlend) + SAND_COLOR.r * sandBlend;
+        colors[i * 3 + 1] = colors[i * 3 + 1] * (1 - sandBlend) + SAND_COLOR.g * sandBlend;
+        colors[i * 3 + 2] = colors[i * 3 + 2] * (1 - sandBlend) + SAND_COLOR.b * sandBlend;
+      }
+    }
+
+    // River and lake sandy coloring using SDF data
+    if (hydrology) {
+      this._applyRiverLakeSandColors(colors, elevation, hydrology);
+    }
+  }
+
+  /**
+   * Apply sandy coloring near rivers and lakes using SDF distance fields.
+   */
+  _applyRiverLakeSandColors(colors, elevation, hydrology) {
+    const { width, height, data } = elevation;
+    const { riverSDF, lakeSDF } = hydrology;
+    const sdfW = hydrology.width;
+    const sdfH = hydrology.height;
+
+    // River sandy coloring
+    if (riverSDF && sdfW && sdfH) {
+      for (let iz = 0; iz < height; iz++) {
+        for (let ix = 0; ix < width; ix++) {
+          const vi = iz * width + ix;
+
+          // Map terrain grid to SDF grid
+          const sdfX = Math.floor((ix / (width - 1)) * (sdfW - 1));
+          const sdfZ = Math.floor((iz / (height - 1)) * (sdfH - 1));
+          const sdfIdx = sdfZ * sdfW + sdfX;
+
+          if (sdfIdx < 0 || sdfIdx >= riverSDF.length) continue;
+          const dist = riverSDF[sdfIdx];
+
+          if (dist < RIVER_SAND_RADIUS) {
+            // Stronger sand close to river, fading out
+            const t = dist / RIVER_SAND_RADIUS;
+            const sandBlend = (1.0 - t * t) * 0.8; // Quadratic falloff, max 80%
+            colors[vi * 3]     = colors[vi * 3]     * (1 - sandBlend) + SAND_COLOR.r * sandBlend;
+            colors[vi * 3 + 1] = colors[vi * 3 + 1] * (1 - sandBlend) + SAND_COLOR.g * sandBlend;
+            colors[vi * 3 + 2] = colors[vi * 3 + 2] * (1 - sandBlend) + SAND_COLOR.b * sandBlend;
+          }
+        }
+      }
+    }
+
+    // Lake sandy coloring
+    if (lakeSDF && sdfW && sdfH) {
+      for (let iz = 0; iz < height; iz++) {
+        for (let ix = 0; ix < width; ix++) {
+          const vi = iz * width + ix;
+
+          const sdfX = Math.floor((ix / (width - 1)) * (sdfW - 1));
+          const sdfZ = Math.floor((iz / (height - 1)) * (sdfH - 1));
+          const sdfIdx = sdfZ * sdfW + sdfX;
+
+          if (sdfIdx < 0 || sdfIdx >= lakeSDF.length) continue;
+          const dist = lakeSDF[sdfIdx];
+
+          // lakeSDF is signed: negative = inside lake, positive = outside
+          if (dist < LAKE_SAND_RADIUS) {
+            const inside = dist <= 0;
+            const absDist = Math.abs(dist);
+            let sandBlend;
+            if (inside) {
+              // Inside lake: strong sandy bed
+              sandBlend = 0.85;
+            } else {
+              // Outside: shore band
+              const t = absDist / LAKE_SAND_RADIUS;
+              sandBlend = (1.0 - t * t) * 0.7;
+            }
+            colors[vi * 3]     = colors[vi * 3]     * (1 - sandBlend) + SAND_COLOR.r * sandBlend;
+            colors[vi * 3 + 1] = colors[vi * 3 + 1] * (1 - sandBlend) + SAND_COLOR.g * sandBlend;
+            colors[vi * 3 + 2] = colors[vi * 3 + 2] * (1 - sandBlend) + SAND_COLOR.b * sandBlend;
+          }
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // River ribbon meshes
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build flat ribbon meshes for each river following its polyline.
+   * @param {Array} rivers - River objects with vertices[].{x, z, elevation, width}
+   */
+  _buildRiverMeshes(rivers) {
+    if (!rivers || rivers.length === 0) return;
+
+    const hScale = this.baseHeightScale * this.heightExaggeration;
+    const WATER_LIFT = 0.005; // Lift water above terrain to avoid z-fighting
+
+    for (const river of rivers) {
+      const verts = river.vertices;
+      if (!verts || verts.length < 2) continue;
+
+      // Build left/right ribbon vertices
+      const ribbonPositions = [];
+
+      for (let i = 0; i < verts.length; i++) {
+        const v = verts[i];
+
+        // Compute tangent direction
+        let tx, tz;
+        if (i === 0) {
+          tx = verts[1].x - v.x;
+          tz = verts[1].z - v.z;
+        } else if (i === verts.length - 1) {
+          tx = v.x - verts[i - 1].x;
+          tz = v.z - verts[i - 1].z;
+        } else {
+          tx = verts[i + 1].x - verts[i - 1].x;
+          tz = verts[i + 1].z - verts[i - 1].z;
+        }
+
+        // Normalize tangent
+        const tLen = Math.sqrt(tx * tx + tz * tz);
+        if (tLen < 1e-8) continue;
+        tx /= tLen;
+        tz /= tLen;
+
+        // Perpendicular (normal to tangent in XZ plane)
+        const nx = -tz;
+        const nz = tx;
+
+        // River half-width
+        const halfW = (v.width || 0.006) * 0.5;
+
+        // Y position: river elevation scaled to 3D
+        const y = (v.elevation || 0) * hScale + WATER_LIFT;
+
+        // Left vertex
+        ribbonPositions.push(v.x + nx * halfW, y, v.z + nz * halfW);
+        // Right vertex
+        ribbonPositions.push(v.x - nx * halfW, y, v.z - nz * halfW);
+      }
+
+      // Need at least 2 cross-sections (4 vertices)
+      const crossSections = ribbonPositions.length / 6;
+      if (crossSections < 2) continue;
+
+      // Build triangle indices for the ribbon strip
+      const triCount = (crossSections - 1) * 2;
+      const indices = new Uint16Array(triCount * 3);
+      let idx = 0;
+      for (let s = 0; s < crossSections - 1; s++) {
+        const bl = s * 2;       // bottom-left
+        const br = s * 2 + 1;   // bottom-right
+        const tl = (s + 1) * 2; // top-left
+        const tr = (s + 1) * 2 + 1; // top-right
+
+        // Two triangles per quad
+        indices[idx++] = bl;
+        indices[idx++] = tl;
+        indices[idx++] = br;
+        indices[idx++] = br;
+        indices[idx++] = tl;
+        indices[idx++] = tr;
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(ribbonPositions, 3));
+      geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+      geometry.computeVertexNormals();
+
+      const mesh = new THREE.Mesh(geometry, this.inlandWaterMaterial);
+      this.scene.add(mesh);
+      this.riverMeshes.push(mesh);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lake polygon meshes
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build flat polygon meshes for each lake at its water level.
+   * @param {Array} lakes - Lake objects with boundary[].{x, z} and waterLevel
+   */
+  _buildLakeMeshes(lakes) {
+    if (!lakes || lakes.length === 0) return;
+
+    const hScale = this.baseHeightScale * this.heightExaggeration;
+    const WATER_LIFT = 0.005;
+
+    for (const lake of lakes) {
+      const boundary = lake.boundary;
+      if (!boundary || boundary.length < 3) continue;
+
+      const y = (lake.waterLevel || this.seaLevel) * hScale + WATER_LIFT;
+
+      // Build positions from boundary
+      const positions = new Float32Array(boundary.length * 3);
+      for (let i = 0; i < boundary.length; i++) {
+        positions[i * 3] = boundary[i].x;
+        positions[i * 3 + 1] = y;
+        positions[i * 3 + 2] = boundary[i].z;
+      }
+
+      // Fan triangulation from centroid (insert centroid as vertex 0)
+      // Compute centroid
+      let cx = 0, cz = 0;
+      for (const p of boundary) {
+        cx += p.x;
+        cz += p.z;
+      }
+      cx /= boundary.length;
+      cz /= boundary.length;
+
+      // Positions: centroid + boundary vertices
+      const totalVerts = boundary.length + 1;
+      const allPositions = new Float32Array(totalVerts * 3);
+      allPositions[0] = cx;
+      allPositions[1] = y;
+      allPositions[2] = cz;
+      for (let i = 0; i < boundary.length; i++) {
+        allPositions[(i + 1) * 3] = boundary[i].x;
+        allPositions[(i + 1) * 3 + 1] = y;
+        allPositions[(i + 1) * 3 + 2] = boundary[i].z;
+      }
+
+      // Fan triangles: centroid (0) -> boundary[i] -> boundary[i+1]
+      const triCount = boundary.length;
+      const indices = [];
+      for (let i = 0; i < boundary.length; i++) {
+        const next = (i + 1) % boundary.length;
+        indices.push(0, i + 1, next + 1);
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(allPositions, 3));
+      geometry.setIndex(indices);
+      geometry.computeVertexNormals();
+
+      const mesh = new THREE.Mesh(geometry, this.inlandWaterMaterial);
+      this.scene.add(mesh);
+      this.lakeMeshes.push(mesh);
+    }
+  }
+
+  /**
+   * Remove all river and lake water surface meshes from the scene.
+   */
+  _clearInlandWater() {
+    for (const mesh of this.riverMeshes) {
+      mesh.geometry.dispose();
+      this.scene.remove(mesh);
+    }
+    this.riverMeshes = [];
+
+    for (const mesh of this.lakeMeshes) {
+      mesh.geometry.dispose();
+      this.scene.remove(mesh);
+    }
+    this.lakeMeshes = [];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Height exaggeration & controls
+  // ---------------------------------------------------------------------------
 
   /**
    * Update vertical exaggeration without full mesh rebuild.
@@ -239,6 +575,13 @@ export class View3D {
     }
 
     this.waterMesh.position.y = this.seaLevel * this.baseHeightScale * scale;
+
+    // Rebuild inland water at new scale
+    this._clearInlandWater();
+    if (this.hydrologyData) {
+      this._buildRiverMeshes(this.hydrologyData.rivers);
+      this._buildLakeMeshes(this.hydrologyData.lakes);
+    }
   }
 
   /**
@@ -257,6 +600,8 @@ export class View3D {
    */
   setWaterVisible(visible) {
     this.waterMesh.visible = visible;
+    for (const mesh of this.riverMeshes) mesh.visible = visible;
+    for (const mesh of this.lakeMeshes) mesh.visible = visible;
   }
 
   /**
@@ -304,6 +649,10 @@ export class View3D {
       this.waterMesh.geometry.dispose();
       this.waterMaterial.dispose();
     }
+    if (this.inlandWaterMaterial) {
+      this.inlandWaterMaterial.dispose();
+    }
+    this._clearInlandWater();
     this.renderer.dispose();
     this.controls.dispose();
   }

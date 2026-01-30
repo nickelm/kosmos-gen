@@ -322,6 +322,9 @@ function traceRiver(
     return { river: null, newLakes, stats: depStats };
   }
 
+  // Enforce monotonically decreasing elevation before simplification
+  enforceMonotonicRaw(rawVertices, seaLevel);
+
   const vertices = simplifyRiverPath(rawVertices, cellW * 0.6);
   const river = { id: riverId, vertices, termination, terminatingLakeId: null };
   return { river, newLakes, stats: depStats };
@@ -620,6 +623,46 @@ function buildLake(data, width, height, bounds, cellW, cellH, fill, seaLevel) {
     inflowRiverIds: [],
     outflowRiverId: null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Monotonic elevation enforcement
+// ---------------------------------------------------------------------------
+
+/**
+ * Enforce monotonically decreasing elevation along raw river vertices.
+ * Also applies a smooth ramp to sea level over the final 30% of the river.
+ * @param {Array} vertices - Raw river vertices with elevation
+ * @param {number} seaLevel - Sea level threshold
+ */
+function enforceMonotonicRaw(vertices, seaLevel) {
+  if (vertices.length < 2) return;
+
+  // Forward pass: each vertex must be <= its predecessor
+  for (let i = 1; i < vertices.length; i++) {
+    if (vertices[i].elevation > vertices[i - 1].elevation) {
+      vertices[i].elevation = vertices[i - 1].elevation;
+    }
+  }
+
+  // If the river doesn't reach sea level, ramp the last 30% toward it
+  const last = vertices[vertices.length - 1];
+  if (last.elevation > seaLevel) {
+    const startIdx = Math.floor(vertices.length * 0.7);
+    const startElev = vertices[startIdx].elevation;
+    for (let i = startIdx; i < vertices.length; i++) {
+      const t = (i - startIdx) / (vertices.length - 1 - startIdx);
+      const ramped = startElev + (seaLevel - startElev) * t;
+      vertices[i].elevation = Math.min(vertices[i].elevation, ramped);
+    }
+  }
+
+  // Second forward pass to clean up any ramp artifacts
+  for (let i = 1; i < vertices.length; i++) {
+    if (vertices[i].elevation > vertices[i - 1].elevation) {
+      vertices[i].elevation = vertices[i - 1].elevation;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

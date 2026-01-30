@@ -5,6 +5,7 @@
 
 import { deriveSeed, seededRandom } from '../core/seeds.js';
 import { createSimplexNoise } from '../core/noise.js';
+import { smoothstep, lerp } from '../core/math.js';
 import {
   createFlowGrid,
   sampleElevationsToGrid,
@@ -83,7 +84,18 @@ export const DEFAULT_HYDROLOGY_CONFIG = {
   lakeMinArea: 0.001,       // Min area for auto-detected lakes
   gridResolution: 0.01,     // Flow grid cell size
   baseRiverWidth: 0.005,    // Base river width at threshold flow
-  riverWidthScale: 1.0      // River width multiplier
+  riverWidthScale: 1.0,     // River width multiplier
+  // Valley carving profile
+  valleyWidthMultiplier: 6, // Valley extends to width * N from river center
+  floodplainMultiplier: 3,  // Floodplain extends to width * N
+  // Organic shoreline noise
+  shoreNoiseFrequency: 40,  // Noise frequency for zone boundary jitter
+  shoreNoiseAmplitude: 0.3, // Max jitter as fraction of zone width
+  widthNoiseFrequency: 25,  // Noise frequency for width variation
+  widthNoiseAmplitude: 0.2, // Max width variation fraction
+  // Meander erosion
+  meanderErosionStrength: 0.3,  // How much curvature increases carve depth
+  meanderWideningStrength: 0.15 // How much curvature increases width
 };
 
 /**
@@ -137,6 +149,12 @@ export function generateHydrology(world, options = {}) {
       river.flowRate = source.flowRate; // Store for reference
       // Apply meandering to make rivers organic
       applyMeandering(river, meanderNoise, config);
+      // Enforce monotonically decreasing elevation
+      enforceMonotonicElevation(river, world, config);
+      // Compute curvature for meander-dependent effects
+      computeRiverCurvatures(river);
+      // Apply organic width variation
+      applyWidthNoise(river, meanderNoise, config);
       rivers.push(river);
 
       // If river ends at a basin (not coast), create a lake there
@@ -194,6 +212,9 @@ export function generateHydrology(world, options = {}) {
           outflowRiver.sourceLakeId = lake.id;
           lake.outflowRiverId = outflowRiver.id;
           applyMeandering(outflowRiver, meanderNoise, config);
+          enforceMonotonicElevation(outflowRiver, world, config);
+          computeRiverCurvatures(outflowRiver);
+          applyWidthNoise(outflowRiver, meanderNoise, config);
           rivers.push(outflowRiver);
 
           // Link the original river to this lake
@@ -366,6 +387,156 @@ function computeCarveDepth(flow, elevation, config) {
 }
 
 /**
+ * Enforce monotonically decreasing elevation along a river
+ * Ensures water flows downhill continuously from source to terminus
+ * @param {Object} river - River object with vertices
+ * @param {Object} world - World object (used to look up lake water levels)
+ * @param {Object} config - Hydrology configuration
+ */
+function enforceMonotonicElevation(river, world, config) {
+  const vertices = river.vertices;
+  if (vertices.length < 2) return;
+
+  // Determine terminus target elevation
+  let targetElev;
+  if (river.termination === 'coast') {
+    targetElev = SEA_LEVEL;
+  } else if (river.terminatingLakeId) {
+    const lake = (world.lakes || []).find(l => l.id === river.terminatingLakeId);
+    targetElev = lake ? lake.waterLevel : vertices[vertices.length - 1].elevation;
+  } else if (river.sinkLocation) {
+    targetElev = river.sinkLocation.elevation;
+  } else {
+    targetElev = vertices[vertices.length - 1].elevation;
+  }
+
+  // Forward pass: clamp each vertex to be <= predecessor
+  for (let i = 1; i < vertices.length; i++) {
+    if (vertices[i].elevation > vertices[i - 1].elevation) {
+      vertices[i].elevation = vertices[i - 1].elevation;
+    }
+  }
+
+  // Smooth ramp to terminus over final portion of river
+  // Compute cumulative arc-length from end
+  const arcLengths = new Float64Array(vertices.length);
+  arcLengths[vertices.length - 1] = 0;
+  for (let i = vertices.length - 2; i >= 0; i--) {
+    const dx = vertices[i + 1].x - vertices[i].x;
+    const dz = vertices[i + 1].z - vertices[i].z;
+    arcLengths[i] = arcLengths[i + 1] + Math.sqrt(dx * dx + dz * dz);
+  }
+  const totalLength = arcLengths[0];
+  if (totalLength < 0.0001) return;
+
+  // Blend toward target over the last 30% of river length
+  const blendStart = totalLength * 0.3;
+  for (let i = 0; i < vertices.length; i++) {
+    const distToEnd = arcLengths[i];
+    if (distToEnd < blendStart) {
+      const t = smoothstep(0, blendStart, distToEnd);
+      // t=0 at terminus, t=1 at blend start
+      const blended = lerp(targetElev, vertices[i].elevation, t);
+      vertices[i].elevation = Math.min(vertices[i].elevation, blended);
+    }
+  }
+
+  // Final clamp: ensure last vertex reaches target
+  vertices[vertices.length - 1].elevation = Math.min(
+    vertices[vertices.length - 1].elevation,
+    targetElev
+  );
+
+  // Second forward pass after blending to re-enforce monotonic
+  for (let i = 1; i < vertices.length; i++) {
+    if (vertices[i].elevation > vertices[i - 1].elevation) {
+      vertices[i].elevation = vertices[i - 1].elevation;
+    }
+  }
+
+  // Recompute carve depth for each vertex (depends on elevation)
+  if (config.carveEnabled) {
+    for (const v of vertices) {
+      const normalizedFlow = v.flow / (config.riverThreshold || 50);
+      const maxCarve = v.elevation - SEA_LEVEL - 0.01;
+      v.carveDepth = Math.min(normalizedFlow * (config.carveFactor || 0.02), Math.max(0, maxCarve));
+    }
+  }
+}
+
+/**
+ * Compute signed curvature at each river vertex
+ * Positive = curves left, negative = curves right
+ * @param {Object} river - River object with vertices
+ */
+function computeRiverCurvatures(river) {
+  const vertices = river.vertices;
+  if (vertices.length < 3) {
+    for (const v of vertices) v.curvature = 0;
+    return;
+  }
+
+  for (let i = 1; i < vertices.length - 1; i++) {
+    const prev = vertices[i - 1];
+    const curr = vertices[i];
+    const next = vertices[i + 1];
+
+    // Tangent vectors
+    const t1x = curr.x - prev.x;
+    const t1z = curr.z - prev.z;
+    const t2x = next.x - curr.x;
+    const t2z = next.z - curr.z;
+
+    const len1 = Math.sqrt(t1x * t1x + t1z * t1z);
+    const len2 = Math.sqrt(t2x * t2x + t2z * t2z);
+    const segLen = (len1 + len2) / 2;
+
+    if (segLen < 0.00001) {
+      curr.curvature = 0;
+      continue;
+    }
+
+    // Cross product z-component gives signed curvature direction
+    const cross = (t1x / len1) * (t2z / len2) - (t1z / len1) * (t2x / len2);
+    curr.curvature = Math.max(-500, Math.min(500, cross / segLen));
+  }
+
+  // Copy endpoint curvatures from neighbors
+  vertices[0].curvature = vertices[1].curvature;
+  vertices[vertices.length - 1].curvature = vertices[vertices.length - 2].curvature;
+}
+
+/**
+ * Apply organic width variation using noise and curvature
+ * Makes river edges irregular and meander bends asymmetric
+ * @param {Object} river - River object with vertices (must have curvature computed)
+ * @param {Function} noise - Simplex noise function
+ * @param {Object} config - Hydrology configuration
+ */
+function applyWidthNoise(river, noise, config) {
+  const vertices = river.vertices;
+  const widthNoiseFreq = config.widthNoiseFrequency || 25;
+  const widthNoiseAmp = config.widthNoiseAmplitude || 0.2;
+  const meanderWiden = config.meanderWideningStrength || 0.15;
+  const meanderDeepen = config.meanderErosionStrength || 0.3;
+
+  for (const v of vertices) {
+    // Low-frequency noise for organic width variation
+    const n = noise(v.x * widthNoiseFreq, v.z * widthNoiseFreq);
+    const widthJitter = 1.0 + n * widthNoiseAmp;
+
+    // Curvature-dependent widening at meander bends
+    const absCurv = Math.abs(v.curvature || 0);
+    const curvatureBonus = 1.0 + Math.min(absCurv * 200, 3) * meanderWiden;
+
+    v.width *= widthJitter * curvatureBonus;
+
+    // Curvature-dependent deepening of carve depth
+    v.carveDepth *= (1.0 + Math.min(absCurv * 200, 3) * meanderDeepen);
+  }
+}
+
+/**
  * Merge river confluences - when tributaries join main rivers
  * Updates flow values downstream of merge points
  * @param {Array} rivers - Array of river objects
@@ -521,35 +692,40 @@ function perpendicularDistance(point, lineStart, lineEnd) {
 
 /**
  * Find the nearest point on a river to a given world position
+ * Returns enriched info including curvature, tangent, and side for erosion effects
  * @param {Object} river - River object
  * @param {number} x - World X
  * @param {number} z - World Z
- * @returns {{distance: number, width: number, carveDepth: number, t: number}} Nearest point info
+ * @returns {{distance: number, width: number, carveDepth: number, t: number, curvature: number, tangentX: number, tangentZ: number, side: number}} Nearest point info
  */
 export function findNearestRiverPoint(river, x, z) {
   let minDist = Infinity;
   let bestWidth = 0;
   let bestCarveDepth = 0;
   let bestT = 0;
+  let bestCurvature = 0;
+  let bestTangentX = 0;
+  let bestTangentZ = 1;
+  let bestSide = 1;
 
   for (let i = 0; i < river.vertices.length - 1; i++) {
     const v0 = river.vertices[i];
     const v1 = river.vertices[i + 1];
 
     // Find closest point on segment
-    const dx = v1.x - v0.x;
-    const dz = v1.z - v0.z;
-    const segLengthSq = dx * dx + dz * dz;
+    const sdx = v1.x - v0.x;
+    const sdz = v1.z - v0.z;
+    const segLengthSq = sdx * sdx + sdz * sdz;
 
     let t = 0;
     if (segLengthSq > 0) {
       t = Math.max(0, Math.min(1,
-        ((x - v0.x) * dx + (z - v0.z) * dz) / segLengthSq
+        ((x - v0.x) * sdx + (z - v0.z) * sdz) / segLengthSq
       ));
     }
 
-    const closestX = v0.x + t * dx;
-    const closestZ = v0.z + t * dz;
+    const closestX = v0.x + t * sdx;
+    const closestZ = v0.z + t * sdz;
 
     const distX = x - closestX;
     const distZ = z - closestZ;
@@ -561,6 +737,22 @@ export function findNearestRiverPoint(river, x, z) {
       bestWidth = v0.width + t * (v1.width - v0.width);
       bestCarveDepth = v0.carveDepth + t * (v1.carveDepth - v0.carveDepth);
       bestT = (i + t) / (river.vertices.length - 1);
+
+      // Interpolate curvature
+      const c0 = v0.curvature || 0;
+      const c1 = v1.curvature || 0;
+      bestCurvature = c0 + t * (c1 - c0);
+
+      // Tangent direction (normalized segment direction)
+      const segLen = Math.sqrt(segLengthSq);
+      if (segLen > 0.00001) {
+        bestTangentX = sdx / segLen;
+        bestTangentZ = sdz / segLen;
+      }
+
+      // Side: which side of the river is the query point on
+      // Cross product of tangent × (query - closest) gives signed side
+      bestSide = (bestTangentX * distZ - bestTangentZ * distX) >= 0 ? 1 : -1;
     }
   }
 
@@ -568,6 +760,10 @@ export function findNearestRiverPoint(river, x, z) {
     distance: minDist,
     width: bestWidth,
     carveDepth: bestCarveDepth,
-    t: bestT
+    t: bestT,
+    curvature: bestCurvature,
+    tangentX: bestTangentX,
+    tangentZ: bestTangentZ,
+    side: bestSide
   };
 }
