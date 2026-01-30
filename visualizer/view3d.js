@@ -41,6 +41,7 @@ export class View3D {
     // Stored for exaggeration updates without full rebuild
     this.elevationData = null;
     this.hydrologyData = null;
+    this.settlementsData = null;
     this.terrainMesh = null;
     this.terrainMaterial = null;
 
@@ -48,6 +49,9 @@ export class View3D {
     this.riverMeshes = [];
     this.lakeMeshes = [];
     this.inlandWaterMaterial = null;
+
+    // Settlement markers (sprites)
+    this.settlementMarkers = [];
 
     this._initRenderer();
     this._initCamera();
@@ -153,13 +157,15 @@ export class View3D {
    * @param {{ width: number, height: number, data: Uint8Array } | null} biomes
    * @param {{ seaLevel?: number }} params
    * @param {Object | null} hydrology - { rivers, lakes, riverSDF, lakeSDF, width, height }
+   * @param {Object | null} settlements - { settlements: Array }
    */
-  updateTerrain(elevation, biomes, params, hydrology) {
+  updateTerrain(elevation, biomes, params, hydrology, settlements) {
     if (!elevation) return;
 
     // Store for exaggeration updates
     this.elevationData = elevation;
     this.hydrologyData = hydrology || null;
+    this.settlementsData = settlements || null;
     if (params && params.seaLevel !== undefined) {
       this.seaLevel = params.seaLevel;
     }
@@ -188,6 +194,11 @@ export class View3D {
         positions[vi * 3 + 1] = elev;
         positions[vi * 3 + 2] = nz;
       }
+    }
+
+    // Apply settlement terracing to vertex positions
+    if (settlements?.settlements) {
+      this._applySettlementTerracing(positions, width, height, data, settlements.settlements);
     }
 
     // Build vertex colors (with sandy/beach coloring)
@@ -239,6 +250,12 @@ export class View3D {
     if (hydrology) {
       this._buildRiverMeshes(hydrology.rivers);
       this._buildLakeMeshes(hydrology.lakes);
+    }
+
+    // Build settlement markers
+    this._clearSettlementMarkers();
+    if (settlements?.settlements) {
+      this._buildSettlementMarkers(settlements.settlements, data, width, height);
     }
   }
 
@@ -551,6 +568,279 @@ export class View3D {
   }
 
   // ---------------------------------------------------------------------------
+  // Settlement markers (3D sprites with names)
+  // ---------------------------------------------------------------------------
+
+  /** Marker colors by settlement type */
+  static MARKER_COLORS = {
+    city:    { dot: '#daa520', bg: 'rgba(218, 165, 32, 0.85)', text: '#fff' },
+    village: { dot: '#8b5a2b', bg: 'rgba(139, 90, 43, 0.85)',  text: '#fff' },
+    hamlet:  { dot: '#999',    bg: 'rgba(128, 128, 128, 0.85)', text: '#fff' },
+  };
+
+  /** Sprite scale by settlement type (world units) */
+  static MARKER_SCALE = { city: 0.14, village: 0.11, hamlet: 0.08 };
+
+  /**
+   * Build billboard sprites for each settlement with name labels.
+   * @param {Array} settlements - Settlement objects
+   * @param {Float32Array} elevData - Raw elevation grid
+   * @param {number} gridW - Grid width
+   * @param {number} gridH - Grid height
+   */
+  _buildSettlementMarkers(settlements, elevData, gridW, gridH) {
+    if (!settlements || settlements.length === 0) return;
+
+    const hScale = this.baseHeightScale * this.heightExaggeration;
+
+    for (const s of settlements) {
+      const [wx, wz] = s.position;
+      const colors = View3D.MARKER_COLORS[s.type] || View3D.MARKER_COLORS.hamlet;
+      const scale = View3D.MARKER_SCALE[s.type] || 0.08;
+
+      // Sample terrain elevation at settlement center
+      const gx = Math.floor(((wx + 1) / 2) * (gridW - 1));
+      const gz = Math.floor(((wz + 1) / 2) * (gridH - 1));
+      const idx = Math.min(gz * gridW + gx, elevData.length - 1);
+      const terrainY = elevData[Math.max(0, idx)] * hScale;
+
+      // Create label texture
+      const texture = this._createMarkerTexture(s.name, s.type, colors);
+      const aspect = texture.userData?.aspect || 2;
+      const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthTest: true,
+        sizeAttenuation: true,
+      });
+
+      const spriteH = scale * 0.4;
+      const spriteW = spriteH * aspect;
+      const sprite = new THREE.Sprite(material);
+      sprite.scale.set(spriteW, spriteH, 1);
+      sprite.position.set(wx, terrainY + 0.04 + spriteH * 0.5, wz);
+      sprite.renderOrder = 1;
+
+      this.scene.add(sprite);
+      this.settlementMarkers.push(sprite);
+    }
+  }
+
+  /**
+   * Render a settlement label to a canvas and return as a Three.js texture.
+   * Canvas width is sized dynamically to fit the name text.
+   * Layout: colored dot + name + type badge, with pointer triangle below.
+   */
+  _createMarkerTexture(name, type, colors) {
+    // Measure text first to determine canvas width
+    const measureCanvas = document.createElement('canvas');
+    const mCtx = measureCanvas.getContext('2d');
+    mCtx.font = 'bold 28px sans-serif';
+    const nameWidth = mCtx.measureText(name).width;
+    mCtx.font = '18px sans-serif';
+    const typeWidth = mCtx.measureText(type).width;
+    const textWidth = Math.max(nameWidth, typeWidth);
+
+    const pad = 12;
+    const dotR = 10;
+    const dotArea = pad + dotR * 2 + dotR + 10; // left padding + dot diameter + gap
+    const canvasW = Math.ceil(dotArea + textWidth + pad * 2);
+    const canvasH = 80;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d');
+
+    // Background pill
+    const pillH = canvasH - pad * 2 - 10; // leave room for pointer
+    const pillW = canvasW - pad * 2;
+    const r = pillH / 2;
+
+    ctx.fillStyle = colors.bg;
+    ctx.beginPath();
+    ctx.moveTo(pad + r, pad);
+    ctx.lineTo(pad + pillW - r, pad);
+    ctx.arcTo(pad + pillW, pad, pad + pillW, pad + r, r);
+    ctx.arcTo(pad + pillW, pad + pillH, pad + pillW - r, pad + pillH, r);
+    ctx.lineTo(pad + r, pad + pillH);
+    ctx.arcTo(pad, pad + pillH, pad, pad + r, r);
+    ctx.arcTo(pad, pad, pad + r, pad, r);
+    ctx.closePath();
+    ctx.fill();
+
+    // Dot indicator
+    const dotX = pad + r;
+    const dotY = pad + pillH / 2;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, dotR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = colors.dot;
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, dotR - 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Name text
+    const textX = dotX + dotR + 10;
+    ctx.fillStyle = colors.text;
+    ctx.font = 'bold 28px sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillText(name, textX, dotY - 6);
+
+    // Type text (smaller, below name)
+    ctx.font = '18px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText(type, textX, dotY + 16);
+
+    // Pointer triangle at bottom center
+    const triW = 8;
+    const triH = 9;
+    ctx.fillStyle = colors.bg;
+    ctx.beginPath();
+    ctx.moveTo(canvasW / 2 - triW, pad + pillH);
+    ctx.lineTo(canvasW / 2 + triW, pad + pillH);
+    ctx.lineTo(canvasW / 2, pad + pillH + triH);
+    ctx.closePath();
+    ctx.fill();
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    // Store aspect ratio so the sprite can be scaled correctly
+    texture.userData = { aspect: canvasW / canvasH };
+    return texture;
+  }
+
+  /**
+   * Remove all settlement marker sprites from the scene.
+   */
+  _clearSettlementMarkers() {
+    for (const sprite of this.settlementMarkers) {
+      if (sprite.material.map) sprite.material.map.dispose();
+      sprite.material.dispose();
+      this.scene.remove(sprite);
+    }
+    this.settlementMarkers = [];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Settlement terracing
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Modify vertex Y positions to create flat terraced platforms within
+   * settlement footprints, with smooth blending at the edges.
+   *
+   * @param {Float32Array} positions - Vertex position buffer (x, y, z interleaved)
+   * @param {number} width - Grid width
+   * @param {number} height - Grid height
+   * @param {Float32Array} elevData - Raw elevation data [0, 1]
+   * @param {Array} settlements - Settlement objects with terraces
+   */
+  _applySettlementTerracing(positions, width, height, elevData, settlements) {
+    const hScale = this.baseHeightScale * this.heightExaggeration;
+    const BLEND_ZONE = 0.008;
+
+    for (const settlement of settlements) {
+      if (!settlement.terraces || settlement.terraces.length === 0) continue;
+
+      const [sx, sz] = settlement.position;
+      const radius = settlement.radius;
+      const outerRadius = radius + BLEND_ZONE;
+
+      // Find grid bounds that could be affected
+      const minIx = Math.max(0, Math.floor(((sx - outerRadius) + 1) / 2 * (width - 1)));
+      const maxIx = Math.min(width - 1, Math.ceil(((sx + outerRadius) + 1) / 2 * (width - 1)));
+      const minIz = Math.max(0, Math.floor(((sz - outerRadius) + 1) / 2 * (height - 1)));
+      const maxIz = Math.min(height - 1, Math.ceil(((sz + outerRadius) + 1) / 2 * (height - 1)));
+
+      for (let iz = minIz; iz <= maxIz; iz++) {
+        for (let ix = minIx; ix <= maxIx; ix++) {
+          const vi = iz * width + ix;
+          const wx = (ix / (width - 1)) * 2 - 1;
+          const wz = (iz / (height - 1)) * 2 - 1;
+
+          const dx = wx - sx;
+          const dz = wz - sz;
+          const dist = Math.sqrt(dx * dx + dz * dz);
+
+          if (dist > outerRadius) continue;
+
+          // Find the nearest terrace for this point
+          const terraceElev = this._findTerraceElevation(wx, wz, settlement.terraces);
+          if (terraceElev === null) continue;
+
+          const originalElev = elevData[vi];
+          const scaledTerraceElev = terraceElev * hScale;
+
+          if (dist <= radius) {
+            // Inside footprint: snap to terrace elevation
+            positions[vi * 3 + 1] = scaledTerraceElev;
+          } else {
+            // Blend zone: lerp between terrace and original
+            const t = (dist - radius) / BLEND_ZONE;
+            const smoothT = t * t * (3 - 2 * t); // smoothstep
+            positions[vi * 3 + 1] = scaledTerraceElev * (1 - smoothT) + originalElev * hScale * smoothT;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Find the target elevation for a world point based on nearby terraces.
+   * Returns the elevation of the terrace whose polygon is closest, or null.
+   */
+  _findTerraceElevation(wx, wz, terraces) {
+    // Check each terrace polygon (simple point-in-polygon test)
+    for (const terrace of terraces) {
+      if (this._pointInPolygon(wx, wz, terrace.polygon)) {
+        return terrace.targetElevation;
+      }
+    }
+
+    // Not inside any terrace polygon: use nearest terrace by distance to centroid
+    let bestDist = Infinity;
+    let bestElev = null;
+    for (const terrace of terraces) {
+      let cx = 0, cz = 0;
+      for (const [px, pz] of terrace.polygon) {
+        cx += px;
+        cz += pz;
+      }
+      cx /= terrace.polygon.length;
+      cz /= terrace.polygon.length;
+
+      const d = (wx - cx) ** 2 + (wz - cz) ** 2;
+      if (d < bestDist) {
+        bestDist = d;
+        bestElev = terrace.targetElevation;
+      }
+    }
+
+    return bestElev;
+  }
+
+  /**
+   * Point-in-polygon test (ray casting).
+   * @param {number} x
+   * @param {number} z
+   * @param {Array} polygon - Array of [x, z] pairs
+   */
+  _pointInPolygon(x, z, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const [xi, zi] = polygon[i];
+      const [xj, zj] = polygon[j];
+      if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  // ---------------------------------------------------------------------------
   // Height exaggeration & controls
   // ---------------------------------------------------------------------------
 
@@ -570,6 +860,12 @@ export class View3D {
         position.setY(i, data[i] * this.baseHeightScale * scale);
       }
 
+      // Reapply settlement terracing at new scale
+      if (this.settlementsData?.settlements) {
+        const posArray = position.array;
+        this._applySettlementTerracing(posArray, width, height, data, this.settlementsData.settlements);
+      }
+
       position.needsUpdate = true;
       this.terrainMesh.geometry.computeVertexNormals();
     }
@@ -581,6 +877,13 @@ export class View3D {
     if (this.hydrologyData) {
       this._buildRiverMeshes(this.hydrologyData.rivers);
       this._buildLakeMeshes(this.hydrologyData.lakes);
+    }
+
+    // Rebuild settlement markers at new scale
+    this._clearSettlementMarkers();
+    if (this.settlementsData?.settlements && this.elevationData) {
+      const { width, height, data } = this.elevationData;
+      this._buildSettlementMarkers(this.settlementsData.settlements, data, width, height);
     }
   }
 
@@ -653,6 +956,7 @@ export class View3D {
       this.inlandWaterMaterial.dispose();
     }
     this._clearInlandWater();
+    this._clearSettlementMarkers();
     this.renderer.dispose();
     this.controls.dispose();
   }

@@ -12,12 +12,14 @@ import { renderCoastline } from './coastline.js';
 import { renderSpines } from './spines.js';
 import { renderRivers } from './rivers.js';
 import { renderLakes } from './lakes.js';
+import { renderSettlements } from './settlements.js';
 
 export { invalidateUnderwaterCache } from './underwater.js';
 export { invalidateClimateCache } from './climate.js';
 export { invalidateBiomesCache } from './biomes.js';
 export { invalidateRiversCache } from './rivers.js';
 export { invalidateLakesCache } from './lakes.js';
+export { invalidateSettlementsCache } from './settlements.js';
 
 /** All available layers with their renderers and display config */
 export const LAYERS = {
@@ -61,6 +63,12 @@ export const LAYERS = {
     name: 'Coastline',
     render: renderCoastline,
     color: '#222222',
+    defaultVisible: true,
+  },
+  settlements: {
+    name: 'Settlements',
+    render: renderSettlements,
+    color: '#daa520',
     defaultVisible: true,
   },
   spines: {

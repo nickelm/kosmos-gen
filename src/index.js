@@ -120,6 +120,11 @@ export {
   getRiverInfoAt
 } from './terrain/rivercarving.js';
 
+// Settlements
+export { generateSettlements } from './generation/stages/settlements.js';
+export { generateSettlementName } from './generation/naming.js';
+export { convexHull } from './generation/convexhull.js';
+
 // World
 export { World, DEFAULT_HYDROLOGY_CONFIG as WORLD_HYDROLOGY_CONFIG } from './world/world.js';
 export { generateWorld } from './world/generate.js';

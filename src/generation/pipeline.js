@@ -10,9 +10,10 @@ import { generateElevation } from './stages/elevation.js';
 import { generateHydrology } from './stages/hydrology.js';
 import { generateClimate } from './stages/climate.js';
 import { generateBiomes } from './stages/biomes.js';
+import { generateSettlements } from './stages/settlements.js';
 
 /** Stage names in execution order */
-export const STAGES = ['params', 'spines', 'elevation', 'hydrology', 'climate', 'biomes'];
+export const STAGES = ['params', 'spines', 'elevation', 'hydrology', 'climate', 'biomes', 'settlements'];
 
 /**
  * Run the generation pipeline
@@ -25,7 +26,7 @@ export const STAGES = ['params', 'spines', 'elevation', 'hydrology', 'climate', 
  * @returns {Object} Generated world data with timing info
  */
 export function generate(seed, options = {}) {
-  const { resolution = 512, upToStage = 'biomes', archetype, terrainOverrides } = options;
+  const { resolution = 512, upToStage = 'settlements', archetype, terrainOverrides } = options;
 
   const result = {
     seed,
@@ -35,6 +36,7 @@ export function generate(seed, options = {}) {
     hydrology: null,
     climate: null,
     biomes: null,
+    settlements: null,
     timing: {},
   };
 
@@ -99,6 +101,16 @@ export function generate(seed, options = {}) {
   start = performance.now();
   result.biomes = generateBiomes(result.params, result.elevation, result.climate, seed);
   result.timing.biomes = performance.now() - start;
+
+  if (targetIndex < 6) {
+    result.timing.total = performance.now() - totalStart;
+    return result;
+  }
+
+  // Stage 7: Settlements
+  start = performance.now();
+  result.settlements = generateSettlements(result.params, result.elevation, result.hydrology, result.biomes, seed);
+  result.timing.settlements = performance.now() - start;
 
   result.timing.total = performance.now() - totalStart;
   return result;
