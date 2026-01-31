@@ -14,6 +14,8 @@ const STAGE_LABELS = {
   hydrology: 'Hydrology',
   climate: 'Climate',
   biomes: 'Biomes',
+  settlements: 'Settlements',
+  roads: 'Roads',
 };
 
 /**

@@ -13,6 +13,7 @@ import { renderSpines } from './spines.js';
 import { renderRivers } from './rivers.js';
 import { renderLakes } from './lakes.js';
 import { renderSettlements } from './settlements.js';
+import { renderRoads } from './roads.js';
 
 export { invalidateUnderwaterCache } from './underwater.js';
 export { invalidateClimateCache } from './climate.js';
@@ -20,6 +21,7 @@ export { invalidateBiomesCache } from './biomes.js';
 export { invalidateRiversCache } from './rivers.js';
 export { invalidateLakesCache } from './lakes.js';
 export { invalidateSettlementsCache } from './settlements.js';
+export { invalidateRoadsCache } from './roads.js';
 
 /** All available layers with their renderers and display config */
 export const LAYERS = {
@@ -57,6 +59,12 @@ export const LAYERS = {
     name: 'Rivers',
     render: renderRivers,
     color: '#1e90ff',
+    defaultVisible: true,
+  },
+  roads: {
+    name: 'Roads',
+    render: renderRoads,
+    color: '#8B6914',
     defaultVisible: true,
   },
   coastline: {

@@ -122,10 +122,25 @@ export {
 
 // Settlements
 export { generateSettlements } from './generation/stages/settlements.js';
-export { generateSettlementName } from './generation/naming.js';
+export { generateSettlementName, generateName } from './generation/naming.js';
 export { convexHull } from './generation/convexhull.js';
+
+// Roads
+export { generateRoads } from './generation/stages/roads.js';
+export { buildConnectivityGraph } from './generation/roads/connectivity.js';
+export { findPath } from './generation/roads/pathfinding.js';
+
+// POIs
+export { generatePOIs } from './generation/stages/pois.js';
+
+// Configuration defaults
+export { DEFAULT_BIOMES, defaultClassify } from './config/defaultBiomes.js';
+export { DEFAULT_NAMING } from './config/defaultNaming.js';
 
 // World
 export { World, DEFAULT_HYDROLOGY_CONFIG as WORLD_HYDROLOGY_CONFIG } from './world/world.js';
 export { generateWorld } from './world/generate.js';
 export { saveWorld, loadWorld } from './world/storage.js';
+
+// High-level API
+export { generateIsland, DEFAULTS, ARCHETYPES, BIOMES, IslandData, FieldSampler } from './api.js';

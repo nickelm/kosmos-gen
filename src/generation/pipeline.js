@@ -11,9 +11,11 @@ import { generateHydrology } from './stages/hydrology.js';
 import { generateClimate } from './stages/climate.js';
 import { generateBiomes } from './stages/biomes.js';
 import { generateSettlements } from './stages/settlements.js';
+import { generateRoads } from './stages/roads.js';
+import { generatePOIs } from './stages/pois.js';
 
 /** Stage names in execution order */
-export const STAGES = ['params', 'spines', 'elevation', 'hydrology', 'climate', 'biomes', 'settlements'];
+export const STAGES = ['params', 'spines', 'elevation', 'hydrology', 'climate', 'biomes', 'settlements', 'roads', 'pois'];
 
 /**
  * Run the generation pipeline
@@ -21,15 +23,24 @@ export const STAGES = ['params', 'spines', 'elevation', 'hydrology', 'climate', 
  * @param {number} seed - World seed
  * @param {Object} [options]
  * @param {number} [options.resolution=512] - Elevation grid size
- * @param {string} [options.upToStage='biomes'] - Stop after this stage
+ * @param {string} [options.upToStage='pois'] - Stop after this stage
  * @param {string} [options.archetype] - Force a specific archetype
+ * @param {Object} [options.biomes] - Custom biome classifier config
+ * @param {Object} [options.pois] - POI types and placement rules
+ * @param {Object} [options.naming] - Naming palettes
  * @returns {Object} Generated world data with timing info
  */
 export function generate(seed, options = {}) {
-  const { resolution = 512, upToStage = 'settlements', archetype, terrainOverrides } = options;
+  const {
+    resolution = 512, upToStage = 'pois', archetype, terrainOverrides,
+    biomes: biomesConfig, pois: poisConfig, naming: namingConfig,
+  } = options;
+
+  const callerConfig = { biomes: biomesConfig, pois: poisConfig, naming: namingConfig };
 
   const result = {
     seed,
+    _config: callerConfig,
     params: null,
     spines: null,
     elevation: null,
@@ -37,6 +48,8 @@ export function generate(seed, options = {}) {
     climate: null,
     biomes: null,
     settlements: null,
+    roads: null,
+    pois: null,
     timing: {},
   };
 
@@ -97,9 +110,9 @@ export function generate(seed, options = {}) {
     return result;
   }
 
-  // Stage 6: Biomes
+  // Stage 6: Biomes (accepts caller biome config)
   start = performance.now();
-  result.biomes = generateBiomes(result.params, result.elevation, result.climate, seed);
+  result.biomes = generateBiomes(result.params, result.elevation, result.climate, seed, biomesConfig);
   result.timing.biomes = performance.now() - start;
 
   if (targetIndex < 6) {
@@ -107,10 +120,30 @@ export function generate(seed, options = {}) {
     return result;
   }
 
-  // Stage 7: Settlements
+  // Stage 7: Settlements (accepts caller naming config)
   start = performance.now();
-  result.settlements = generateSettlements(result.params, result.elevation, result.hydrology, result.biomes, seed);
+  result.settlements = generateSettlements(result.params, result.elevation, result.hydrology, result.biomes, seed, namingConfig);
   result.timing.settlements = performance.now() - start;
+
+  if (targetIndex < 7) {
+    result.timing.total = performance.now() - totalStart;
+    return result;
+  }
+
+  // Stage 8: Roads
+  start = performance.now();
+  result.roads = generateRoads(result.params, result.elevation, result.hydrology, result.settlements, seed);
+  result.timing.roads = performance.now() - start;
+
+  if (targetIndex < 8) {
+    result.timing.total = performance.now() - totalStart;
+    return result;
+  }
+
+  // Stage 9: POIs (accepts caller POI and naming config)
+  start = performance.now();
+  result.pois = generatePOIs(result, poisConfig, seed, namingConfig);
+  result.timing.pois = performance.now() - start;
 
   result.timing.total = performance.now() - totalStart;
   return result;

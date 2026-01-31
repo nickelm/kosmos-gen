@@ -146,7 +146,7 @@ export function render(ctx, generatedData, layers, layerRenderers, viewport) {
   ctx.translate(sceneOffX, sceneOffY);
 
   // Render layers in scene space [0, sceneSize] x [0, sceneSize]
-  const layerOrder = ['elevation', 'underwater', 'climate', 'biomes', 'lakes', 'rivers', 'settlements', 'coastline', 'spines'];
+  const layerOrder = ['elevation', 'underwater', 'climate', 'biomes', 'lakes', 'rivers', 'roads', 'settlements', 'coastline', 'spines'];
 
   for (const name of layerOrder) {
     if (layers[name] && layerRenderers[name]) {

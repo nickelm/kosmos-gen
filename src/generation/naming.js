@@ -1,61 +1,102 @@
 /**
- * Settlement name generation
+ * Name generation
  *
  * Deterministic name generator using position-based hashing.
- * Produces fantasy settlement names in three patterns:
- * compound (40%), possessive (35%), descriptive (25%).
+ * Supports caller-provided naming palettes with multiple pattern types.
+ * Falls back to built-in Verdania palette when no palette is provided.
  */
 
 import { deriveSeed, seededRandom } from '../core/seeds.js';
+import { DEFAULT_NAMING } from '../config/defaultNaming.js';
 
 // ---------------------------------------------------------------------------
-// Word lists (Verdania naming palette)
+// Pattern generators
+//
+// Each takes (rng, palette) and returns a name string.
+// Patterns reference fields in the palette object by convention.
 // ---------------------------------------------------------------------------
 
-const ROOTS = [
-  'Willow', 'Oak', 'Ash', 'Thorn', 'Stone', 'Iron', 'Brook', 'Glen',
-  'Elm', 'Birch', 'Moss', 'Fern', 'Copper', 'Hazel', 'Alder', 'Reed',
-  'Briar', 'Cliff', 'Mist', 'Storm', 'Raven', 'Crane', 'Fox', 'Hare',
-  'Silver', 'Gold', 'Amber', 'Flint', 'Slate', 'Wren',
-];
+function pick(rng, arr) {
+  if (!arr || arr.length === 0) return '';
+  return arr[Math.floor(rng() * arr.length)];
+}
 
-const SUFFIXES = [
-  'ford', 'wick', 'holme', 'dale', 'mere', 'fell', 'stead', 'gate',
-  'haven', 'ton', 'bridge', 'vale', 'moor', 'croft', 'field', 'wood',
-  'marsh', 'reach', 'bury', 'holt',
-];
+const PATTERN_GENERATORS = {
+  /** root + suffix -> "Thornwick" */
+  compound(rng, p) {
+    return pick(rng, p.roots) + pick(rng, p.suffixes).toLowerCase();
+  },
 
-const PEOPLE = [
-  'Miller', 'Smith', 'Cooper', 'Warden', 'Shepherd', 'Fletcher',
-  'Mason', 'Thatcher', 'Brewer', 'Carter', 'Forester', 'Fisher',
-  'Tinker', 'Chandler', 'Wainwright', 'Bowman',
-];
+  /** person + 's + feature -> "Cooper's Rest" */
+  possessive(rng, p) {
+    return `${pick(rng, p.people)}'s ${pick(rng, p.features)}`;
+  },
 
-const FEATURES = [
-  'Rest', 'Crossing', 'Bridge', 'Well', 'Mill', 'Hall', 'Keep',
-  'Landing', 'Watch', 'Hollow', 'Hearth', 'Lodge', 'Wharf', 'Market',
-  'Green', 'End',
-];
+  /** descriptor + feature -> "Quiet Haven" */
+  descriptive(rng, p) {
+    return `${pick(rng, p.descriptors)} ${pick(rng, p.features)}`;
+  },
 
-const DESCRIPTORS = [
-  'Old', 'Quiet', 'High', 'Low', 'Green', 'White', 'Dark', 'Long',
-  'Far', 'Bright', 'Deep', 'Broad', 'North', 'South', 'East', 'West',
-];
+  /** The + adjective + noun -> "The Fallen Temple" */
+  the_adjective_noun(rng, p) {
+    return `The ${pick(rng, p.adjectives)} ${pick(rng, p.nouns)}`;
+  },
+
+  /** person + 's + noun -> "King's Tomb" */
+  possessive_noun(rng, p) {
+    return `${pick(rng, p.people)}'s ${pick(rng, p.nouns)}`;
+  },
+
+  /** name + Isle -> "Vern Isle" */
+  name_isle(rng, p) {
+    return `${pick(rng, p.names)} Isle`;
+  },
+
+  /** The + adjective + name -> "The Iron Korth" */
+  the_adjective_name(rng, p) {
+    return `The ${pick(rng, p.adjectives)} ${pick(rng, p.names)}`;
+  },
+
+  /** name + Field -> "Peterson Field" */
+  name_field(rng, p) {
+    return `${pick(rng, p.names)} Field`;
+  },
+
+  /** direction + name -> "North Eagle" */
+  direction_name(rng, p) {
+    return `${pick(rng, p.directions)} ${pick(rng, p.names)}`;
+  },
+
+  /** The + name + River -> "The Willow River" */
+  the_name_river(rng, p) {
+    return `The ${pick(rng, p.names)} River`;
+  },
+
+  /** Just the name -> "Storm" */
+  name(rng, p) {
+    return pick(rng, p.names);
+  },
+};
 
 // ---------------------------------------------------------------------------
-// Name generation
+// Main API
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a deterministic settlement name.
+ * Generate a deterministic name from a palette.
  *
- * @param {number} x - Settlement world X coordinate
- * @param {number} z - Settlement world Z coordinate
+ * @param {number} x - World X coordinate (used for seed derivation)
+ * @param {number} z - World Z coordinate (used for seed derivation)
  * @param {number} seed - World seed
- * @param {string} type - 'city' | 'village' | 'hamlet'
+ * @param {string} category - Category hint (e.g. 'city', 'village', 'island', 'river')
+ * @param {Object} [palette] - Naming palette with patterns and word lists.
+ *   If null/undefined, uses the appropriate default palette.
  * @returns {string} Generated name
  */
-export function generateSettlementName(x, z, seed, type) {
+export function generateName(x, z, seed, category, palette) {
+  // Resolve palette: use provided, or pick from defaults
+  const effectivePalette = palette || resolveDefaultPalette(category);
+
   // Create a deterministic RNG from position and seed
   const nameSeed = deriveSeed(
     deriveSeed(seed, 'name'),
@@ -63,41 +104,69 @@ export function generateSettlementName(x, z, seed, type) {
   );
   const rng = seededRandom(nameSeed);
 
-  // Pattern selection: compound 40%, possessive 35%, descriptive 25%
-  const roll = rng();
+  // Select pattern
+  const patterns = effectivePalette.patterns;
+  if (!patterns || patterns.length === 0) {
+    return pick(rng, effectivePalette.names || effectivePalette.roots) || 'Unnamed';
+  }
 
-  if (roll < 0.40) {
-    return compoundName(rng);
-  } else if (roll < 0.75) {
-    return possessiveName(rng);
+  const weights = effectivePalette.weights;
+  let patternName;
+
+  if (weights && weights.length === patterns.length) {
+    // Weighted selection
+    const roll = rng();
+    let cumulative = 0;
+    patternName = patterns[patterns.length - 1]; // fallback to last
+    for (let i = 0; i < weights.length; i++) {
+      cumulative += weights[i];
+      if (roll < cumulative) {
+        patternName = patterns[i];
+        break;
+      }
+    }
   } else {
-    return descriptiveName(rng);
+    // Equal weight
+    patternName = patterns[Math.floor(rng() * patterns.length)];
+  }
+
+  const generator = PATTERN_GENERATORS[patternName];
+  if (!generator) {
+    // Unknown pattern, fall back to picking a name or root
+    return pick(rng, effectivePalette.names || effectivePalette.roots) || 'Unnamed';
+  }
+
+  return generator(rng, effectivePalette);
+}
+
+/**
+ * Resolve the default palette for a given category.
+ */
+function resolveDefaultPalette(category) {
+  switch (category) {
+    case 'island':
+      return DEFAULT_NAMING.island || DEFAULT_NAMING.settlement;
+    case 'river':
+      return DEFAULT_NAMING.river || DEFAULT_NAMING.settlement;
+    default:
+      return DEFAULT_NAMING.settlement;
   }
 }
 
-/**
- * Compound name: Root + suffix (e.g. "Thornwick", "Ashford")
- */
-function compoundName(rng) {
-  const root = ROOTS[Math.floor(rng() * ROOTS.length)];
-  const suffix = SUFFIXES[Math.floor(rng() * SUFFIXES.length)];
-  return root + suffix.toLowerCase();
-}
+// ---------------------------------------------------------------------------
+// Backward-compatible wrapper
+// ---------------------------------------------------------------------------
 
 /**
- * Possessive name: Person's Feature (e.g. "Cooper's Rest")
+ * Generate a deterministic settlement name (legacy API).
+ *
+ * @param {number} x - Settlement world X coordinate
+ * @param {number} z - Settlement world Z coordinate
+ * @param {number} seed - World seed
+ * @param {string} type - 'city' | 'village' | 'hamlet'
+ * @param {Object} [palette] - Optional naming palette override
+ * @returns {string} Generated name
  */
-function possessiveName(rng) {
-  const person = PEOPLE[Math.floor(rng() * PEOPLE.length)];
-  const feature = FEATURES[Math.floor(rng() * FEATURES.length)];
-  return `${person}'s ${feature}`;
-}
-
-/**
- * Descriptive name: Descriptor Feature (e.g. "Quiet Haven")
- */
-function descriptiveName(rng) {
-  const descriptor = DESCRIPTORS[Math.floor(rng() * DESCRIPTORS.length)];
-  const feature = FEATURES[Math.floor(rng() * FEATURES.length)];
-  return `${descriptor} ${feature}`;
+export function generateSettlementName(x, z, seed, type, palette) {
+  return generateName(x, z, seed, type, palette);
 }

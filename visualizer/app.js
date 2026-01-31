@@ -7,7 +7,7 @@
 
 import { generate } from '../src/generation/pipeline.js';
 import { initCanvas, render } from './canvas.js';
-import { getLayerRenderers, getDefaultLayerVisibility, invalidateUnderwaterCache, invalidateClimateCache, invalidateBiomesCache, invalidateRiversCache, invalidateLakesCache, invalidateSettlementsCache } from './layers/index.js';
+import { getLayerRenderers, getDefaultLayerVisibility, invalidateUnderwaterCache, invalidateClimateCache, invalidateBiomesCache, invalidateRiversCache, invalidateLakesCache, invalidateSettlementsCache, invalidateRoadsCache } from './layers/index.js';
 import { invalidateElevationCache } from './layers/elevation.js';
 import { invalidateCoastlineCache } from './layers/coastline.js';
 import { initControls } from './ui/controls.js';
@@ -25,7 +25,7 @@ import { initTerrainParams } from './ui/terrain-params.js';
 const state = {
   seed: 42,
   archetype: null, // null = random selection from seed
-  currentStage: 'settlements',
+  currentStage: 'roads',
   generatedData: null,
   layers: getDefaultLayerVisibility(),
   generating: false,
@@ -60,6 +60,7 @@ window.addEventListener('resize', () => {
   invalidateBiomesCache();
   invalidateRiversCache();
   invalidateLakesCache();
+  invalidateRoadsCache();
   invalidateSettlementsCache();
   redraw();
 });
@@ -132,13 +133,14 @@ function doGenerate(seed) {
       invalidateBiomesCache();
       invalidateRiversCache();
       invalidateLakesCache();
+      invalidateRoadsCache();
       invalidateSettlementsCache();
       redraw();
       updateInfoBar();
 
       // Update 3D view
       if (state.viewMode === '3d' && result.elevation) {
-        view3d.updateTerrain(result.elevation, result.biomes, result.params, result.hydrology, result.settlements);
+        view3d.updateTerrain(result.elevation, result.biomes, result.params, result.hydrology, result.settlements, result.roads);
       }
 
       if (stagePanel) {
@@ -221,6 +223,7 @@ initViewToggle(document.getElementById('controls'), {
           state.generatedData.params,
           state.generatedData.hydrology,
           state.generatedData.settlements,
+          state.generatedData.roads,
         );
       }
     } else {

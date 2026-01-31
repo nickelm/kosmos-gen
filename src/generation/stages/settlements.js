@@ -68,11 +68,12 @@ const BLEND_ZONE = 0.008;
  * @param {Object} params    - { seaLevel, … }
  * @param {Object} elevation - { width, height, data: Float32Array, bounds }
  * @param {Object} hydrology - { rivers, lakes, riverSDF, lakeSDF, width, height }
- * @param {Object} biomes    - { data: Uint8Array, width, height }
+ * @param {Object} biomes    - { data: Uint8Array, width, height, registry: Object|null }
  * @param {number} seed
+ * @param {Object} [namingConfig] - Caller naming palettes
  * @returns {{ settlements: Array, coastSDF: Float32Array }}
  */
-export function generateSettlements(params, elevation, hydrology, biomes, seed) {
+export function generateSettlements(params, elevation, hydrology, biomes, seed, namingConfig) {
   if (!elevation || !hydrology) {
     return { settlements: [], coastSDF: null };
   }
@@ -103,7 +104,7 @@ export function generateSettlements(params, elevation, hydrology, biomes, seed) 
   const settlements = placeSettlements(
     scores, data, width, height, bounds, cellW, cellH, seaLevel,
     targetCities, targetVillages, targetHamlets,
-    seed, rng
+    seed, rng, namingConfig
   );
 
   // 5. Generate terraces for each settlement
@@ -250,8 +251,8 @@ function scoreSuitability(
         continue;
       }
 
-      // Reject bad biomes
-      if (biomes && biomes.data) {
+      // Reject bad biomes (only for default Whittaker; custom biomes rely on elevation check above)
+      if (biomes && biomes.data && !biomes.registry) {
         const biomeId = biomes.data[idx];
         if (REJECTED_BIOMES.has(biomeId)) {
           scores[cr * coarseW + cc] = -Infinity;
@@ -313,7 +314,7 @@ function scoreSuitability(
 function placeSettlements(
   scoreData, data, width, height, bounds, cellW, cellH, seaLevel,
   targetCities, targetVillages, targetHamlets,
-  seed, rng
+  seed, rng, namingConfig
 ) {
   const { scores, coarseW, coarseH } = scoreData;
   const settlements = [];
@@ -331,20 +332,22 @@ function placeSettlements(
     }
   }
 
+  const settlementPalette = namingConfig?.settlement || null;
+
   // Place cities (first placed gets pure best-score; cities are few)
   const numCities = resolveCount(targetCities, rng);
   placeType('city', numCities, CITY_THRESHOLD, candidates, settlements,
-    data, width, bounds, cellW, seed, rng);
+    data, width, bounds, cellW, seed, rng, settlementPalette);
 
   // Place villages (spread-aware)
   const numVillages = resolveCount(targetVillages, rng);
   placeType('village', numVillages, VILLAGE_THRESHOLD, candidates, settlements,
-    data, width, bounds, cellW, seed, rng);
+    data, width, bounds, cellW, seed, rng, settlementPalette);
 
   // Place hamlets (spread-aware)
   const numHamlets = resolveCount(targetHamlets, rng);
   placeType('hamlet', numHamlets, HAMLET_THRESHOLD, candidates, settlements,
-    data, width, bounds, cellW, seed, rng);
+    data, width, bounds, cellW, seed, rng, settlementPalette);
 
   return settlements;
 }
@@ -362,7 +365,7 @@ const SPREAD_WEIGHT = 3.0;
 
 function placeType(
   type, count, threshold, candidates, settlements,
-  data, width, bounds, cellW, seed, rng
+  data, width, bounds, cellW, seed, rng, namingPalette
 ) {
   const typeDef = SETTLEMENT_TYPES[type];
 
@@ -409,7 +412,7 @@ function placeType(
     const elev = data[row * width + col];
 
     const radius = typeDef.radiusMin + rng() * (typeDef.radiusMax - typeDef.radiusMin);
-    const name = generateSettlementName(cand.wx, cand.wz, seed, type);
+    const name = generateSettlementName(cand.wx, cand.wz, seed, type, namingPalette);
 
     settlements.push({
       id: `${type}_${placed}`,

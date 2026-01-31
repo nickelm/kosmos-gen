@@ -53,12 +53,18 @@ export class View3D {
     // Settlement markers (sprites)
     this.settlementMarkers = [];
 
+    // Road ribbon meshes
+    this.roadMeshes = [];
+    this.roadsData = null;
+    this.roadMaterial = null;
+
     this._initRenderer();
     this._initCamera();
     this._initControls();
     this._initLighting();
     this._initWaterPlane();
     this._initInlandWaterMaterial();
+    this._initRoadMaterial();
     this._animate();
   }
 
@@ -135,6 +141,16 @@ export class View3D {
     });
   }
 
+  _initRoadMaterial() {
+    this.roadMaterial = new THREE.MeshLambertMaterial({
+      color: 0x8B6914,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -8,
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Animation
   // ---------------------------------------------------------------------------
@@ -158,14 +174,16 @@ export class View3D {
    * @param {{ seaLevel?: number }} params
    * @param {Object | null} hydrology - { rivers, lakes, riverSDF, lakeSDF, width, height }
    * @param {Object | null} settlements - { settlements: Array }
+   * @param {Object | null} roads - { roads: Array }
    */
-  updateTerrain(elevation, biomes, params, hydrology, settlements) {
+  updateTerrain(elevation, biomes, params, hydrology, settlements, roads) {
     if (!elevation) return;
 
     // Store for exaggeration updates
     this.elevationData = elevation;
     this.hydrologyData = hydrology || null;
     this.settlementsData = settlements || null;
+    this.roadsData = roads || null;
     if (params && params.seaLevel !== undefined) {
       this.seaLevel = params.seaLevel;
     }
@@ -250,6 +268,12 @@ export class View3D {
     if (hydrology) {
       this._buildRiverMeshes(hydrology.rivers);
       this._buildLakeMeshes(hydrology.lakes);
+    }
+
+    // Build road ribbons
+    this._clearRoadMeshes();
+    if (roads?.roads) {
+      this._buildRoadMeshes(roads.roads, data, width, height);
     }
 
     // Build settlement markers
@@ -568,6 +592,157 @@ export class View3D {
   }
 
   // ---------------------------------------------------------------------------
+  // Road ribbon meshes + bridge/tunnel markers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build flat ribbon meshes for each road following its waypoints.
+   * Uses roadElevation (embankment height) when available.
+   * Also creates 3D box markers for bridges and tunnels.
+   *
+   * @param {Array} roads - Road objects with .waypoints, .width, .segments
+   * @param {Float32Array} elevData - Raw elevation grid
+   * @param {number} gridW - Grid width
+   * @param {number} gridH - Grid height
+   */
+  _buildRoadMeshes(roads, elevData, gridW, gridH) {
+    if (!roads || roads.length === 0) return;
+
+    const hScale = this.baseHeightScale * this.heightExaggeration;
+
+    // Materials for bridge and tunnel markers
+    const bridgeMaterial = new THREE.MeshLambertMaterial({ color: 0x5588aa });
+    const tunnelMaterial = new THREE.MeshLambertMaterial({ color: 0x666666 });
+
+    for (const road of roads) {
+      const waypoints = road.waypoints;
+      if (!waypoints || waypoints.length < 2) continue;
+
+      const halfW = (road.width || 0.005) * 0.5;
+      const ribbonPositions = [];
+
+      for (let i = 0; i < waypoints.length; i++) {
+        const v = waypoints[i];
+
+        // Compute tangent direction
+        let tx, tz;
+        if (i === 0) {
+          tx = waypoints[1].x - v.x;
+          tz = waypoints[1].z - v.z;
+        } else if (i === waypoints.length - 1) {
+          tx = v.x - waypoints[i - 1].x;
+          tz = v.z - waypoints[i - 1].z;
+        } else {
+          tx = waypoints[i + 1].x - waypoints[i - 1].x;
+          tz = waypoints[i + 1].z - waypoints[i - 1].z;
+        }
+
+        // Normalize tangent
+        const tLen = Math.sqrt(tx * tx + tz * tz);
+        if (tLen < 1e-8) continue;
+        tx /= tLen;
+        tz /= tLen;
+
+        // Perpendicular
+        const nx = -tz;
+        const nz = tx;
+
+        // Y position: use embankment elevation if available, otherwise terrain + lift
+        const elev = v.roadElevation != null ? v.roadElevation : (v.elevation || 0);
+        const y = elev * hScale;
+
+        ribbonPositions.push(v.x + nx * halfW, y, v.z + nz * halfW);
+        ribbonPositions.push(v.x - nx * halfW, y, v.z - nz * halfW);
+      }
+
+      // Need at least 2 cross-sections
+      const crossSections = ribbonPositions.length / 6;
+      if (crossSections < 2) continue;
+
+      // Build triangle indices
+      const triCount = (crossSections - 1) * 2;
+      const indices = new Uint16Array(triCount * 3);
+      let idx = 0;
+      for (let s = 0; s < crossSections - 1; s++) {
+        const bl = s * 2;
+        const br = s * 2 + 1;
+        const tl = (s + 1) * 2;
+        const tr = (s + 1) * 2 + 1;
+        indices[idx++] = bl;
+        indices[idx++] = tl;
+        indices[idx++] = br;
+        indices[idx++] = br;
+        indices[idx++] = tl;
+        indices[idx++] = tr;
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(ribbonPositions, 3));
+      geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+      geometry.computeVertexNormals();
+
+      const mesh = new THREE.Mesh(geometry, this.roadMaterial);
+      this.scene.add(mesh);
+      this.roadMeshes.push(mesh);
+
+      // -- Bridge and tunnel box markers --
+      if (road.segments) {
+        for (const seg of road.segments) {
+          if (seg.type === 'bridge' && seg.startIdx < waypoints.length && seg.endIdx < waypoints.length) {
+            const sWp = waypoints[seg.startIdx];
+            const eWp = waypoints[seg.endIdx];
+            const cx = (sWp.x + eWp.x) / 2;
+            const cz = (sWp.z + eWp.z) / 2;
+            const sElev = sWp.roadElevation != null ? sWp.roadElevation : sWp.elevation;
+            const eElev = eWp.roadElevation != null ? eWp.roadElevation : eWp.elevation;
+            const cy = ((sElev + eElev) / 2) * hScale;
+            const span = seg.bridgeData?.spanLength || 0.02;
+            const boxW = road.width * 1.5;
+            const boxH = 0.008 * hScale;
+
+            const boxGeo = new THREE.BoxGeometry(boxW, boxH, Math.max(span, 0.005));
+            const boxMesh = new THREE.Mesh(boxGeo, bridgeMaterial);
+            // Orient box along the segment direction
+            const angle = Math.atan2(eWp.x - sWp.x, eWp.z - sWp.z);
+            boxMesh.rotation.y = angle;
+            boxMesh.position.set(cx, cy - boxH * 0.5, cz);
+            this.scene.add(boxMesh);
+            this.roadMeshes.push(boxMesh);
+          }
+
+          if (seg.type === 'tunnel' && seg.startIdx < waypoints.length && seg.endIdx < waypoints.length) {
+            // Tunnel entrance markers at both ends
+            const entrances = [waypoints[seg.startIdx], waypoints[seg.endIdx]];
+            for (const wp of entrances) {
+              const elev = wp.roadElevation != null ? wp.roadElevation : wp.elevation;
+              const y = elev * hScale;
+              const boxGeo = new THREE.BoxGeometry(road.width * 2, 0.015 * hScale, road.width * 2);
+              const boxMesh = new THREE.Mesh(boxGeo, tunnelMaterial);
+              boxMesh.position.set(wp.x, y, wp.z);
+              this.scene.add(boxMesh);
+              this.roadMeshes.push(boxMesh);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Remove all road ribbon meshes and markers from the scene.
+   */
+  _clearRoadMeshes() {
+    for (const mesh of this.roadMeshes) {
+      mesh.geometry.dispose();
+      if (mesh.material !== this.roadMaterial) {
+        mesh.material.dispose();
+      }
+      this.scene.remove(mesh);
+    }
+    this.roadMeshes = [];
+  }
+
+  // ---------------------------------------------------------------------------
   // Settlement markers (3D sprites with names)
   // ---------------------------------------------------------------------------
 
@@ -877,6 +1052,13 @@ export class View3D {
     if (this.hydrologyData) {
       this._buildRiverMeshes(this.hydrologyData.rivers);
       this._buildLakeMeshes(this.hydrologyData.lakes);
+    }
+
+    // Rebuild road ribbons at new scale
+    this._clearRoadMeshes();
+    if (this.roadsData?.roads && this.elevationData) {
+      const { width, height, data } = this.elevationData;
+      this._buildRoadMeshes(this.roadsData.roads, data, width, height);
     }
 
     // Rebuild settlement markers at new scale
