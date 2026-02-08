@@ -7,7 +7,9 @@
       "Bash(cd:*)",
       "Bash(ls -la \"d:\\\\Dropbox\\\\Dev\\\\GolemCraft - Viggo\\\\kosmos-gen\\\\src\"\" && echo \"---\" && ls -la \"d:DropboxDevGolemCraft - Viggokosmos-gensrcgeneration\"\")",
       "Bash(tree:*)",
-      "WebFetch(domain:localhost)"
+      "WebFetch(domain:localhost)",
+      "Bash(ls -la \"d:\\\\Dropbox\\\\Dev\\\\GolemCraft - Viggo\\\\kosmos-gen\\\\docs\"\" 2>/dev/null || echo \"docs directory not found \")",
+      "Bash(timeout 6 npm run dev:map:*)"
     ]
   }
 }

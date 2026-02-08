@@ -2,10 +2,10 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 
 export default defineConfig({
-  root: 'app',
+  root: 'visualizer',
   base: '/kosmos-gen/',
   build: {
-    outDir: '../dist',
+    outDir: '../dist-visualizer',
     emptyOutDir: true,
   },
   resolve: {
@@ -14,6 +14,6 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5174,
+    port: 5175,
   },
 });

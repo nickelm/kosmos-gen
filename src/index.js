@@ -168,5 +168,11 @@ export {
   queryAllFeatures
 } from './world/queries.js';
 
+// Textures
+export { createTileableNoise, createTileableRidgedNoise, createTileableWorleyNoise, generateNoiseField, generateMultiLayerField } from './textures/noisegen.js';
+export { TEXTURE_PRESETS, BIOME_TINTS, samplePalette, applyTint } from './textures/palettes.js';
+export { generateTexture, generateAllTextures } from './textures/texturegen.js';
+export { pixelsToPngBlob, downloadTexturePng, downloadAllTextures } from './textures/exporter.js';
+
 // High-level API
 export { generateIsland, DEFAULTS, ARCHETYPES, BIOMES, IslandData, FieldSampler } from './api.js';
