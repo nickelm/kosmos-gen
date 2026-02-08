@@ -9,7 +9,9 @@
       "Bash(tree:*)",
       "WebFetch(domain:localhost)",
       "Bash(ls -la \"d:\\\\Dropbox\\\\Dev\\\\GolemCraft - Viggo\\\\kosmos-gen\\\\docs\"\" 2>/dev/null || echo \"docs directory not found \")",
-      "Bash(timeout 6 npm run dev:map:*)"
+      "Bash(timeout 6 npm run dev:map:*)",
+      "Bash(npx vite build:*)",
+      "Bash(npx vite:*)"
     ]
   }
 }

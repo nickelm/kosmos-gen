@@ -2,14 +2,15 @@
  * kosmos-gen app entry point.
  *
  * Tab-based router for asset generation tools.
- * Phase 1: Textures tab only.
+ * Phase 1: Textures, Phase 2: Sprites.
  */
 
 import { initTexturesTab } from './tabs/textures.js';
+import { initSpritesTab } from './tabs/sprites/index.js';
 
 const TABS = [
   { id: 'textures', label: 'Textures', init: initTexturesTab },
-  // Phase 2: { id: 'sprites', label: 'Sprites', init: initSpritesTab },
+  { id: 'sprites', label: 'Sprites', init: initSpritesTab },
   // Phase 3: { id: 'monsters', label: 'Monsters', init: initMonstersTab },
   // Phase 4: { id: 'buildings', label: 'Buildings', init: initBuildingsTab },
 ];
