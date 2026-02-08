@@ -11,6 +11,7 @@ import { deriveSeed, seededRandom } from '../../core/seeds.js';
 import { createSimplexNoise } from '../../core/noise.js';
 import { clamp, pointToSegmentDistance } from '../../core/math.js';
 import { extractContours, simplifyPolyline } from '../../geometry/contour.js';
+import { bakeInfluenceField } from '../../geometry/influence.js';
 
 // ---------------------------------------------------------------------------
 // D8 neighbor offsets: N, NE, E, SE, S, SW, W, NW
@@ -130,11 +131,30 @@ export function generateHydrology(params, elevation, seed, spines) {
 
   console.log(`[hydrology] ${placedLakes.length} placed lakes (total: ${lakes.length})`);
 
-  // 3. SDFs
+  // 3. SDFs (kept for backward compatibility)
   const riverSDF = computeRiverSDF(rivers, width, height, bounds, cellW);
   const lakeSDF = computeLakeSDF(lakes, data, width, height, bounds, cellW, seaLevel);
 
-  return { rivers, lakes, riverSDF, lakeSDF, width, height };
+  // 4. Influence fields — smooth falloff replacements for SDFs
+  let riverInfluence = null;
+  if (rivers.length > 0) {
+    const riverPolylines = rivers.map(r => r.vertices);
+    let maxWidth = 0;
+    for (const r of rivers) {
+      for (const v of r.vertices) {
+        if (v.width > maxWidth) maxWidth = v.width;
+      }
+    }
+    const valleyMul = 6; // matches MAX_VALLEY_WIDTH_MUL in rivercarving.js
+    riverInfluence = bakeInfluenceField(riverPolylines, {
+      resolution: Math.max(width, height),
+      innerRadius: maxWidth,
+      outerRadius: maxWidth * valleyMul,
+      bounds
+    });
+  }
+
+  return { rivers, lakes, riverSDF, lakeSDF, riverInfluence, width, height };
 }
 
 // ---------------------------------------------------------------------------

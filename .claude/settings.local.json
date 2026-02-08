@@ -5,7 +5,9 @@
       "Bash(node --check:*)",
       "Bash(npm run build:*)",
       "Bash(cd:*)",
-      "Bash(ls -la \"d:\\\\Dropbox\\\\Dev\\\\GolemCraft - Viggo\\\\kosmos-gen\\\\src\"\" && echo \"---\" && ls -la \"d:DropboxDevGolemCraft - Viggokosmos-gensrcgeneration\"\")"
+      "Bash(ls -la \"d:\\\\Dropbox\\\\Dev\\\\GolemCraft - Viggo\\\\kosmos-gen\\\\src\"\" && echo \"---\" && ls -la \"d:DropboxDevGolemCraft - Viggokosmos-gensrcgeneration\"\")",
+      "Bash(tree:*)",
+      "WebFetch(domain:localhost)"
     ]
   }
 }

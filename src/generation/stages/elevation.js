@@ -170,5 +170,79 @@ export function generateElevation(params, spines, seed, resolution = 512) {
     }
   }
 
+  // Apply elevation smoothing to reduce sharp cliffs at spine edges
+  const smoothingRadius = elevationConfig?.smoothingRadius ?? 3;
+  const smoothingPasses = elevationConfig?.smoothingPasses ?? 2;
+
+  if (smoothingRadius > 0 && smoothingPasses > 0) {
+    smoothElevationGrid(data, width, height, smoothingRadius, smoothingPasses, seaLevel);
+  }
+
   return { width, height, data, bounds };
+}
+
+/**
+ * Apply Gaussian-style smoothing to elevation grid to reduce sharp cliffs.
+ * Only smooths land areas (above sea level) to preserve coastlines.
+ *
+ * @param {Float32Array} data - Elevation grid (modified in place)
+ * @param {number} width - Grid width
+ * @param {number} height - Grid height
+ * @param {number} radius - Smoothing radius in cells
+ * @param {number} passes - Number of smoothing passes
+ * @param {number} seaLevel - Sea level threshold
+ */
+function smoothElevationGrid(data, width, height, radius, passes, seaLevel) {
+  const temp = new Float32Array(width * height);
+
+  for (let pass = 0; pass < passes; pass++) {
+    // Copy current data to temp
+    temp.set(data);
+
+    for (let row = 0; row < height; row++) {
+      for (let col = 0; col < width; col++) {
+        const idx = row * width + col;
+        const centerElev = temp[idx];
+
+        // Only smooth land areas above sea level
+        if (centerElev <= seaLevel) continue;
+
+        let sum = 0;
+        let weightSum = 0;
+
+        // Sample in a circular kernel
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            const ny = row + dy;
+            const nx = col + dx;
+
+            // Skip out of bounds
+            if (ny < 0 || ny >= height || nx < 0 || nx >= width) continue;
+
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > radius) continue;
+
+            const neighborIdx = ny * width + nx;
+            const neighborElev = temp[neighborIdx];
+
+            // Gaussian weight: stronger near center
+            const weight = Math.exp(-(dist * dist) / (radius * radius * 0.5));
+
+            // Only include land neighbors in smoothing
+            // (to avoid pulling elevation down near coast)
+            if (neighborElev > seaLevel) {
+              sum += neighborElev * weight;
+              weightSum += weight;
+            }
+          }
+        }
+
+        if (weightSum > 0) {
+          // Blend smoothed value with original (preserve some original detail)
+          const smoothed = sum / weightSum;
+          data[idx] = centerElev * 0.3 + smoothed * 0.7;
+        }
+      }
+    }
+  }
 }

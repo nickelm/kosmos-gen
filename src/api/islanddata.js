@@ -57,6 +57,12 @@ export class IslandData {
       if (result.hydrology.lakeSDF) {
         this._lakeSDF = new FieldSampler(result.hydrology.lakeSDF, hw, hh, bounds);
       }
+      if (result.hydrology.riverInfluence) {
+        const res = Math.round(Math.sqrt(result.hydrology.riverInfluence.length));
+        this._riverInfluence = new FieldSampler(
+          result.hydrology.riverInfluence, res, res, bounds
+        );
+      }
     }
 
     // Coast SDF
@@ -66,10 +72,26 @@ export class IslandData {
       );
     }
 
+    // Coast influence
+    if (result.settlements?.coastInfluence) {
+      const res = Math.round(Math.sqrt(result.settlements.coastInfluence.length));
+      this._coastInfluence = new FieldSampler(
+        result.settlements.coastInfluence, res, res, bounds
+      );
+    }
+
     // Road SDF
     if (result.roads?.roadSDF) {
       this._roadSDF = new FieldSampler(
         result.roads.roadSDF, result.roads.sdfWidth, result.roads.sdfHeight, bounds
+      );
+    }
+
+    // Road influence
+    if (result.roads?.roadInfluence) {
+      const res = Math.round(Math.sqrt(result.roads.roadInfluence.length));
+      this._roadInfluence = new FieldSampler(
+        result.roads.roadInfluence, res, res, bounds
       );
     }
 
@@ -141,6 +163,11 @@ export class IslandData {
    * @param {number} [threshold=0.008] - Distance threshold in normalized units
    */
   isRiver(x, z, threshold = 0.008) {
+    if (this._riverInfluence) {
+      // Influence path: value > 0 means within river's influence zone
+      return this._riverInfluence.sample(x, z) > 0;
+    }
+    // Legacy SDF path
     if (!this._riverSDF) return false;
     return this._riverSDF.sample(x, z) < threshold;
   }
@@ -176,6 +203,10 @@ export class IslandData {
    * @param {number} [threshold=0.007] - Distance threshold (highway half-width)
    */
   isOnRoad(x, z, threshold = 0.007) {
+    if (this._roadInfluence) {
+      return this._roadInfluence.sample(x, z) > 0;
+    }
+    // Legacy SDF path
     if (!this._roadSDF) return false;
     return this._roadSDF.sample(x, z) < threshold;
   }
@@ -416,6 +447,39 @@ export class IslandData {
   }
 
   // ------------------------------------------------------------------
+  // Influence queries (smooth 0.0-1.0 falloff)
+  // ------------------------------------------------------------------
+
+  /**
+   * Get river influence at (x, z). Returns 0.0-1.0.
+   * 0 = no river nearby, 1 = at river center.
+   */
+  getRiverInfluence(x, z) {
+    if (!this._riverInfluence) return 0;
+    return this._riverInfluence.sample(x, z) / 255;
+  }
+
+  /**
+   * Get road influence at (x, z). Returns 0.0-1.0.
+   * 0 = no road nearby, 1 = at road center.
+   */
+  getRoadInfluence(x, z) {
+    if (!this._roadInfluence) return 0;
+    return this._roadInfluence.sample(x, z) / 255;
+  }
+
+  /**
+   * Get coastline influence at (x, z). Returns 0.0-1.0.
+   * 0 = deep ocean, ~0.5 = shoreline, 1 = interior land.
+   */
+  getCoastInfluence(x, z) {
+    if (!this._coastInfluence) {
+      return this.isOcean(x, z) ? 0 : 1;
+    }
+    return this._coastInfluence.sample(x, z) / 255;
+  }
+
+  // ------------------------------------------------------------------
   // Raw sampler access (for advanced consumers like chunk generators)
   // ------------------------------------------------------------------
 
@@ -435,6 +499,12 @@ export class IslandData {
   getCoastSDFSampler() { return this._coastSDF; }
   /** @returns {FieldSampler|undefined} Road distance field sampler */
   getRoadSDFSampler() { return this._roadSDF; }
+  /** @returns {FieldSampler|undefined} River influence sampler (0-255) */
+  getRiverInfluenceSampler() { return this._riverInfluence; }
+  /** @returns {FieldSampler|undefined} Road influence sampler (0-255) */
+  getRoadInfluenceSampler() { return this._roadInfluence; }
+  /** @returns {FieldSampler|undefined} Coast influence sampler (0-255, signed) */
+  getCoastInfluenceSampler() { return this._coastInfluence; }
 
   // ------------------------------------------------------------------
   // Private helpers

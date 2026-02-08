@@ -10,6 +10,8 @@ import { deriveSeed, seededRandom } from '../../core/seeds.js';
 import { clamp, distance } from '../../core/math.js';
 import { convexHull } from '../convexhull.js';
 import { generateSettlementName } from '../naming.js';
+import { bakeCoastlineInfluence } from '../../geometry/influence.js';
+import { extractContours, simplifyPolyline } from '../../geometry/contour.js';
 
 // ---------------------------------------------------------------------------
 // Settlement type definitions (world-space units, 1 block ≈ 0.001)
@@ -116,7 +118,31 @@ export function generateSettlements(params, elevation, hydrology, biomes, seed, 
 
   console.log(`[settlements] ${settlements.length} placed: ${settlements.filter(s => s.type === 'city').length} cities, ${settlements.filter(s => s.type === 'village').length} villages, ${settlements.filter(s => s.type === 'hamlet').length} hamlets`);
 
-  return { settlements, coastSDF };
+  // 6. Bake coastline influence field — smooth signed falloff around coastline
+  let coastInfluence = null;
+  try {
+    const sampleFn = (x, z) => {
+      const c = Math.floor((x - bounds.minX) / cellW);
+      const r = Math.floor((z - bounds.minZ) / cellH);
+      if (c < 0 || c >= width || r < 0 || r >= height) return 0;
+      return data[r * width + c];
+    };
+    const coastRes = cellW * 2;
+    let coastPolylines = extractContours(sampleFn, seaLevel, bounds, coastRes);
+    coastPolylines = coastPolylines.map(pl => simplifyPolyline(pl, coastRes * 0.5));
+    if (coastPolylines.length > 0) {
+      coastInfluence = bakeCoastlineInfluence(coastPolylines, {
+        resolution: Math.max(width, height),
+        beachWidth: 0.02,
+        transitionWidth: 0.05,
+        bounds
+      });
+    }
+  } catch (_) {
+    // Coastline influence is optional; fall back to SDF only
+  }
+
+  return { settlements, coastSDF, coastInfluence };
 }
 
 // ---------------------------------------------------------------------------

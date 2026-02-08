@@ -10,6 +10,7 @@ import { deriveSeed, seededRandom } from '../../core/seeds.js';
 import { distance, clamp } from '../../core/math.js';
 import { buildConnectivityGraph } from '../roads/connectivity.js';
 import { findPath } from '../roads/pathfinding.js';
+import { bakeInfluenceField } from '../../geometry/influence.js';
 
 // ---------------------------------------------------------------------------
 // Road type configuration
@@ -520,8 +521,24 @@ export function generateRoads(params, elevation, hydrology, settlements, seed) {
     }
   }
 
-  // 9. Bake final road SDF
+  // 9. Bake final road SDF (kept for backward compatibility)
   const roadSDF = computeRoadSDF(roads, width, height, bounds, cellW);
 
-  return { roads, roadSDF, sdfWidth: width, sdfHeight: height };
+  // 10. Bake road influence field — smooth falloff around roads
+  let roadInfluence = null;
+  if (roads.length > 0) {
+    const roadPolylines = roads.map(r => r.waypoints);
+    let maxWidth = 0;
+    for (const r of roads) {
+      if (r.width > maxWidth) maxWidth = r.width;
+    }
+    roadInfluence = bakeInfluenceField(roadPolylines, {
+      resolution: Math.max(width, height),
+      innerRadius: maxWidth,
+      outerRadius: maxWidth * 3,
+      bounds
+    });
+  }
+
+  return { roads, roadSDF, roadInfluence, sdfWidth: width, sdfHeight: height };
 }

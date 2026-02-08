@@ -2,17 +2,11 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 
 export default defineConfig({
-  root: '.',
+  root: 'visualizer',
   base: '/kosmos-gen/',
   build: {
-    outDir: 'dist',
+    outDir: '../dist',
     emptyOutDir: true,
-    rollupOptions: {
-      input: {
-        editor: resolve(__dirname, 'editor/index.html'),
-        visualizer: resolve(__dirname, 'visualizer/index.html'),
-      },
-    },
   },
   resolve: {
     alias: {

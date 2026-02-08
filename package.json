@@ -11,9 +11,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
-    "vis": "vite --open /visualizer/index.html",
-    "editor": "vite --open /editor/index.html"
+    "preview": "vite preview"
   },
   "keywords": [
     "procedural-generation",

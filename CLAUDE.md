@@ -1,61 +1,116 @@
 # kosmos-gen
 
-Procedural world generation library with spine-Voronoi terrain.
+Procedural island generation library for GolemCraft.
 
 ## Project Structure
 
 ```
 kosmos-gen/
-├── src/                  # Library source
+├── src/
 │   ├── core/             # Seeds, math, noise
-│   ├── geometry/         # Voronoi, polylines, SDF
-│   ├── terrain/          # Spines, elevation, profiles
-│   ├── world/            # World data structure, queries, storage
+│   ├── geometry/         # Polylines, SDF utilities
+│   ├── generation/       # Island generation pipeline
+│   │   ├── island-generator.js   # Main orchestrator
+│   │   ├── spine-placer.js       # Procedural spine placement
+│   │   ├── elevation-field.js    # Height from spines + noise
+│   │   ├── hydrology.js          # Rivers, lakes
+│   │   ├── settlements.js        # Placement and A* roads
+│   │   ├── sdf.js                # Distance/influence field baking
+│   │   ├── polyline-index.js     # Spatial indexing (NEW)
+│   │   ├── queries.js            # Hybrid query API (NEW)
+│   │   ├── profiles.js           # Terrain profiles (NEW)
+│   │   └── metadata.js           # IslandMetadata structure
+│   ├── visualizer/       # Debug/preview UI
 │   └── index.js          # Public API
-├── editor/               # Template editor application
-├── templates/            # Example templates
+├── templates/            # Example island configs
 └── docs/                 # Documentation
 ```
 
+## Current State
+
+**Working:**
+- Island generation pipeline (spines → elevation → climate → biomes → rivers → settlements → roads)
+- Visualizer with stage-by-stage inspection
+- SDF baking for coastlines, rivers, roads
+
+**Problem:**
+- Raw SDF sampling produces visual artifacts in-game
+- Coastlines: sheer drops at zero crossing
+- Roads: circular disk shapes instead of natural paths
+- Rivers: no proper channel profiles
+
+## Current Focus: Hybrid Query System
+
+Replace raw SDF thresholding with influence textures + vector queries.
+
+### Key Files to Modify/Add
+
+| File | Status | Purpose |
+|------|--------|---------|
+| `src/generation/polyline-index.js` | NEW | Spatial index for fast polyline lookup |
+| `src/generation/sdf.js` | MODIFY | Bake influence (smooth falloff) not raw distance |
+| `src/generation/queries.js` | NEW | Hybrid query API for terrain worker |
+| `src/generation/profiles.js` | NEW | Coastline/river/road terrain shaping |
+| `src/generation/metadata.js` | MODIFY | Add indices and per-vertex polyline attributes |
+
+### Implementation Order
+
+1. `polyline-index.js` — pure geometry, no dependencies
+2. Modify SDF baking → influence encoding
+3. `queries.js` — two-phase query (influence texture → vector precision)
+4. `profiles.js` — terrain modification functions
+5. Update metadata schema
+6. Visualizer debug tools
+
+See `docs/hybrid_query_spec.md` for full specification.
+
 ## Key Concepts
 
-**Spine-Voronoi terrain**: Mountain spines (polylines) define ridges. Spine vertices become Voronoi seeds. Each vertex creates half-cells with configurable elevation profiles.
+**Island Generation Pipeline:**
+1. Params — size, archetype, climate from seed
+2. Spines — mountain ridge placement (ridge, arc, crescent, ring, star)
+3. Elevation — noise + spine bias + island falloff
+4. Climate — temperature, humidity fields
+5. Biomes — Whittaker diagram lookup
+6. Hydrology — gradient descent rivers, lakes
+7. Civilization — settlement placement, A* road network
+8. SDF Baking — influence fields for chunk queries
 
-**Half-cells**: Interior vertices create 2 half-cells (left/right of spine). Endpoints create 1 radial cell. Each half-cell has a profile (ramp/plateau/bowl/shield) and noise parameters.
+**Hybrid Queries:**
+- Influence textures give O(1) "is feature nearby?" answer
+- When influence > 0, query actual polyline geometry
+- Polylines store per-vertex attributes (width, flow, type)
+- Profile functions convert query results to terrain modifications
 
-**Power diagram**: Weighted Voronoi where vertex `influence` controls cell extent.
-
-**Profiles**: Named terrain shapes—ramp (linear slope), plateau (flat top), bowl (concave), shield (convex).
+**IslandMetadata:**
+- Exported JSON + binary arrays
+- Contains elevation, climate, biomes as raster fields
+- Contains coastlines, rivers, roads as polylines with attributes
+- Contains spatial indices for vector queries
+- GolemCraft terrain worker consumes this
 
 ## Running
 
 ```bash
 npm install
-npm run dev     # Start editor at localhost:5174
+npm run dev     # Start visualizer at localhost:5174
 npm run build   # Build for production
 ```
-
-## Architecture
-
-See `docs/architecture.md` for full design.
 
 ## Conventions
 
 - ES6 modules, lowercase filenames
 - Pure functions where possible
 - Deterministic: same seed = same output
-- No Three.js or DOM dependencies in src/ (editor only)
-- World data coordinates in normalized space [-1, 1] (but editor canvas is infinite/pannable)
+- No Three.js dependencies in src/generation/ (visualizer only)
+- Coordinates in world blocks unless noted
 
-## Editor Tabs
+## Integration with GolemCraft
 
-1. **Spines** — Draw spines, see Voronoi cells and coastline
-2. **Terrain Noise** — Add procedural detail
-3. **Hydrology** — Rivers and lakes
-4. **Climate** — Temperature, humidity, biomes
-5. **Zones & Routes** — Gameplay regions
-6. **Landmarks & Content** — Setpieces, NPCs, quests
+kosmos-gen produces IslandMetadata. GolemCraft's terrain worker:
+1. Loads metadata on first island visit
+2. Calls query functions during chunk generation
+3. Applies profile functions to shape terrain
+4. Stores in IndexedDB for persistence
 
-## Current Focus
-
-Building Tab 1: spine drawing → Voronoi → elevation → coastline display.
+The game's rendering (Three.js, chunks) is unaffected. Only the terrain data source changes.

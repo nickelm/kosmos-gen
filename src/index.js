@@ -30,6 +30,8 @@ export {
   polygonArea,
   polygonCentroid
 } from './geometry/polygon.js';
+export { bakeInfluenceField, bakeCoastlineInfluence } from './geometry/influence.js';
+export { createPolylineIndex, queryNearbySegments, distanceToSegment } from './geometry/polyline-index.js';
 
 // Terrain - Blob system
 export {
@@ -120,6 +122,14 @@ export {
   getRiverInfoAt
 } from './terrain/rivercarving.js';
 
+// Terrain - Profiles
+export {
+  coastlineProfile,
+  riverProfile,
+  roadProfile,
+  SURFACE_TYPES
+} from './terrain/profiles.js';
+
 // Settlements
 export { generateSettlements } from './generation/stages/settlements.js';
 export { generateSettlementName, generateName } from './generation/naming.js';
@@ -141,6 +151,22 @@ export { DEFAULT_NAMING } from './config/defaultNaming.js';
 export { World, DEFAULT_HYDROLOGY_CONFIG as WORLD_HYDROLOGY_CONFIG } from './world/world.js';
 export { generateWorld } from './world/generate.js';
 export { saveWorld, loadWorld } from './world/storage.js';
+
+// Metadata
+export {
+  convertRiverToPolyline,
+  convertRoadToPolyline,
+  convertCoastlineToPolyline,
+  createContinentMetadata
+} from './world/metadata.js';
+
+// Queries
+export {
+  queryCoastline,
+  queryRiver,
+  queryRoad,
+  queryAllFeatures
+} from './world/queries.js';
 
 // High-level API
 export { generateIsland, DEFAULTS, ARCHETYPES, BIOMES, IslandData, FieldSampler } from './api.js';
